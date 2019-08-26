@@ -37,8 +37,8 @@ type SentPacketHandler interface {
 	PeekPacketNumber(protocol.EncryptionLevel) (protocol.PacketNumber, protocol.PacketNumberLen)
 	PopPacketNumber(protocol.EncryptionLevel) protocol.PacketNumber
 
-	GetAlarmTimeout() time.Time
-	OnAlarm() error
+	GetLossDetectionTimeout() time.Time
+	OnLossDetectionTimeout() error
 
 	// report some congestion statistics. For tracing only.
 	GetStats() *quictrace.TransportState
@@ -46,7 +46,7 @@ type SentPacketHandler interface {
 
 // ReceivedPacketHandler handles ACKs needed to send for incoming packets
 type ReceivedPacketHandler interface {
-	ReceivedPacket(pn protocol.PacketNumber, encLevel protocol.EncryptionLevel, rcvTime time.Time, shouldInstigateAck bool) error
+	ReceivedPacket(pn protocol.PacketNumber, encLevel protocol.EncryptionLevel, rcvTime time.Time, shouldInstigateAck bool)
 	IgnoreBelow(protocol.PacketNumber)
 	DropPackets(protocol.EncryptionLevel)
 
