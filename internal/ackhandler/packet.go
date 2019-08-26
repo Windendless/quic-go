@@ -29,7 +29,6 @@ type Packet struct {
 func (p *Packet) ToPacket() *protocol.Packet {
 	return &protocol.Packet{
 		PacketNumber: p.PacketNumber,
-		PacketType:   p.PacketType,
 		Length:       p.Length,
 		SendTime:     p.SendTime,
 	}
