@@ -53,3 +53,11 @@ type ReceivedPacketHandler interface {
 	GetAlarmTimeout() time.Time
 	GetAckFrame(protocol.EncryptionLevel) *wire.AckFrame
 }
+
+func (p *Packet) ToPacket() *protocol.Packet {
+	return &protocol.Packet{
+		PacketNumber: p.PacketNumber,
+		Length:       p.Length,
+		SendTime:     p.SendTime,
+	}
+}
