@@ -85,13 +85,15 @@ var _ = Describe("Client", func() {
 		) (quic.Session, error) {
 			Expect(hostname).To(Equal("localhost:1337"))
 			Expect(tlsConfP.ServerName).To(Equal(tlsConf.ServerName))
-			Expect(tlsConfP.NextProtos).To(Equal([]string{"proto foo", "proto bar", nextProtoH3}))
+			Expect(tlsConfP.NextProtos).To(Equal([]string{nextProtoH3}))
 			Expect(quicConfP.IdleTimeout).To(Equal(quicConf.IdleTimeout))
 			dialAddrCalled = true
 			return nil, errors.New("test done")
 		}
 		client.RoundTrip(req)
 		Expect(dialAddrCalled).To(BeTrue())
+		// make sure the original tls.Config was not modified
+		Expect(tlsConf.NextProtos).To(Equal([]string{"proto foo", "proto bar"}))
 	})
 
 	It("uses the custom dialer, if provided", func() {
@@ -102,7 +104,7 @@ var _ = Describe("Client", func() {
 		dialer := func(network, address string, tlsConfP *tls.Config, quicConfP *quic.Config) (quic.Session, error) {
 			Expect(network).To(Equal("udp"))
 			Expect(address).To(Equal("localhost:1337"))
-			Expect(tlsConfP).To(Equal(tlsConf))
+			Expect(tlsConfP.ServerName).To(Equal("foo.bar"))
 			Expect(quicConfP.IdleTimeout).To(Equal(quicConf.IdleTimeout))
 			dialerCalled = true
 			return nil, testErr
@@ -296,6 +298,56 @@ var _ = Describe("Client", func() {
 				}).AnyTimes()
 				_, err := client.RoundTrip(request)
 				Expect(err).To(MatchError("Headers frame too large: 1338 bytes (max: 1337)"))
+			})
+		})
+
+		Context("request cancelations", func() {
+			It("cancels a request while the request is still in flight", func() {
+				ctx, cancel := context.WithCancel(context.Background())
+				req := request.WithContext(ctx)
+				sess.EXPECT().OpenStreamSync(context.Background()).Return(str, nil)
+				buf := &bytes.Buffer{}
+				str.EXPECT().Close().MaxTimes(1)
+
+				done := make(chan struct{})
+				str.EXPECT().Write(gomock.Any()).DoAndReturn(func(p []byte) (int, error) {
+					return buf.Write(p)
+				})
+				str.EXPECT().CancelWrite(quic.ErrorCode(errorRequestCanceled))
+				str.EXPECT().CancelRead(quic.ErrorCode(errorRequestCanceled)).Do(func(quic.ErrorCode) { close(done) })
+				str.EXPECT().Read(gomock.Any()).DoAndReturn(func([]byte) (int, error) {
+					cancel()
+					return 0, errors.New("test done")
+				})
+				_, err := client.RoundTrip(req)
+				Expect(err).To(MatchError("test done"))
+				Eventually(done).Should(BeClosed())
+			})
+
+			It("cancels a request after the response arrived", func() {
+				rspBuf := &bytes.Buffer{}
+				rw := newResponseWriter(rspBuf, utils.DefaultLogger)
+				rw.WriteHeader(418)
+
+				ctx, cancel := context.WithCancel(context.Background())
+				req := request.WithContext(ctx)
+				sess.EXPECT().OpenStreamSync(context.Background()).Return(str, nil)
+				buf := &bytes.Buffer{}
+				str.EXPECT().Close().MaxTimes(1)
+
+				done := make(chan struct{})
+				str.EXPECT().Write(gomock.Any()).DoAndReturn(func(p []byte) (int, error) {
+					return buf.Write(p)
+				})
+				str.EXPECT().Read(gomock.Any()).DoAndReturn(func(b []byte) (int, error) {
+					return rspBuf.Read(b)
+				}).AnyTimes()
+				str.EXPECT().CancelWrite(quic.ErrorCode(errorRequestCanceled))
+				str.EXPECT().CancelRead(quic.ErrorCode(errorRequestCanceled)).Do(func(quic.ErrorCode) { close(done) })
+				_, err := client.RoundTrip(req)
+				Expect(err).ToNot(HaveOccurred())
+				cancel()
+				Eventually(done).Should(BeClosed())
 			})
 		})
 
