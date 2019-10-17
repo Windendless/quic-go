@@ -152,14 +152,14 @@ var _ = Describe("Client", func() {
 			decoder := qpack.NewDecoder(nil)
 
 			frame, err := parseNextFrame(str)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(frame).To(BeAssignableToTypeOf(&headersFrame{}))
+			ExpectWithOffset(1, err).ToNot(HaveOccurred())
+			ExpectWithOffset(1, frame).To(BeAssignableToTypeOf(&headersFrame{}))
 			headersFrame := frame.(*headersFrame)
 			data := make([]byte, headersFrame.Length)
 			_, err = io.ReadFull(str, data)
-			Expect(err).ToNot(HaveOccurred())
+			ExpectWithOffset(1, err).ToNot(HaveOccurred())
 			hfs, err := decoder.DecodeFull(data)
-			Expect(err).ToNot(HaveOccurred())
+			ExpectWithOffset(1, err).ToNot(HaveOccurred())
 			for _, p := range hfs {
 				fields[p.Name] = p.Value
 			}
@@ -179,23 +179,6 @@ var _ = Describe("Client", func() {
 			var err error
 			request, err = http.NewRequest("GET", "https://quic.clemente.io:1337/file1.dat", nil)
 			Expect(err).ToNot(HaveOccurred())
-		})
-
-		It("sends a request", func() {
-			sess.EXPECT().OpenStreamSync(context.Background()).Return(str, nil)
-			buf := &bytes.Buffer{}
-			str.EXPECT().Write(gomock.Any()).DoAndReturn(func(p []byte) (int, error) {
-				return buf.Write(p)
-			})
-			str.EXPECT().Close()
-			str.EXPECT().Read(gomock.Any()).Return(0, errors.New("test done"))
-			_, err := client.RoundTrip(request)
-			Expect(err).To(MatchError("test done"))
-			hfs := decodeHeader(buf)
-			Expect(hfs).To(HaveKeyWithValue(":scheme", "https"))
-			Expect(hfs).To(HaveKeyWithValue(":method", "GET"))
-			Expect(hfs).To(HaveKeyWithValue(":authority", "quic.clemente.io:1337"))
-			Expect(hfs).To(HaveKeyWithValue(":path", "/file1.dat"))
 		})
 
 		It("returns a response", func() {
@@ -250,7 +233,10 @@ var _ = Describe("Client", func() {
 
 			It("sends a request", func() {
 				done := make(chan struct{})
-				str.EXPECT().Close().Do(func() { close(done) })
+				gomock.InOrder(
+					str.EXPECT().Close().Do(func() { close(done) }),
+					str.EXPECT().CancelWrite(gomock.Any()).MaxTimes(1), // when reading the response errors
+				)
 				// the response body is sent asynchronously, while already reading the response
 				str.EXPECT().Read(gomock.Any()).DoAndReturn(func([]byte) (int, error) {
 					<-done
@@ -266,9 +252,13 @@ var _ = Describe("Client", func() {
 			It("returns the error that occurred when reading the body", func() {
 				request.Body.(*mockBody).readErr = errors.New("testErr")
 				done := make(chan struct{})
-				str.EXPECT().CancelWrite(quic.ErrorCode(errorRequestCanceled)).Do(func(quic.ErrorCode) {
-					close(done)
-				})
+				gomock.InOrder(
+					str.EXPECT().CancelWrite(quic.ErrorCode(errorRequestCanceled)).Do(func(quic.ErrorCode) {
+						close(done)
+					}),
+					str.EXPECT().CancelWrite(gomock.Any()),
+				)
+
 				// the response body is sent asynchronously, while already reading the response
 				str.EXPECT().Read(gomock.Any()).DoAndReturn(func([]byte) (int, error) {
 					<-done
@@ -278,30 +268,36 @@ var _ = Describe("Client", func() {
 				Expect(err).To(MatchError("test done"))
 			})
 
-			It("errors when the first frame is not a HEADERS frame", func() {
+			It("closes the connection when the first frame is not a HEADERS frame", func() {
 				buf := &bytes.Buffer{}
 				(&dataFrame{Length: 0x42}).Write(buf)
-				str.EXPECT().Close().MaxTimes(1)
+				sess.EXPECT().CloseWithError(quic.ErrorCode(errorUnexpectedFrame), gomock.Any())
+				closed := make(chan struct{})
+				str.EXPECT().Close().Do(func() { close(closed) })
 				str.EXPECT().Read(gomock.Any()).DoAndReturn(func(b []byte) (int, error) {
 					return buf.Read(b)
 				}).AnyTimes()
 				_, err := client.RoundTrip(request)
-				Expect(err).To(MatchError("not a HEADERS frame"))
+				Expect(err).To(MatchError("expected first frame to be a HEADERS frame"))
+				Eventually(closed).Should(BeClosed())
 			})
 
-			It("errors when the first frame is not a HEADERS frame", func() {
+			It("cancels the stream when the HEADERS frame is too large", func() {
 				buf := &bytes.Buffer{}
 				(&headersFrame{Length: 1338}).Write(buf)
-				str.EXPECT().Close().MaxTimes(1)
+				str.EXPECT().CancelWrite(quic.ErrorCode(errorFrameError))
+				closed := make(chan struct{})
+				str.EXPECT().Close().Do(func() { close(closed) })
 				str.EXPECT().Read(gomock.Any()).DoAndReturn(func(b []byte) (int, error) {
 					return buf.Read(b)
 				}).AnyTimes()
 				_, err := client.RoundTrip(request)
-				Expect(err).To(MatchError("Headers frame too large: 1338 bytes (max: 1337)"))
+				Expect(err).To(MatchError("HEADERS frame too large: 1338 bytes (max: 1337)"))
+				Eventually(closed).Should(BeClosed())
 			})
 		})
 
-		Context("request cancelations", func() {
+		Context("request cancellations", func() {
 			It("cancels a request while the request is still in flight", func() {
 				ctx, cancel := context.WithCancel(context.Background())
 				req := request.WithContext(ctx)
@@ -309,14 +305,20 @@ var _ = Describe("Client", func() {
 				buf := &bytes.Buffer{}
 				str.EXPECT().Close().MaxTimes(1)
 
-				done := make(chan struct{})
 				str.EXPECT().Write(gomock.Any()).DoAndReturn(func(p []byte) (int, error) {
 					return buf.Write(p)
 				})
-				str.EXPECT().CancelWrite(quic.ErrorCode(errorRequestCanceled))
-				str.EXPECT().CancelRead(quic.ErrorCode(errorRequestCanceled)).Do(func(quic.ErrorCode) { close(done) })
+
+				done := make(chan struct{})
+				canceled := make(chan struct{})
+				gomock.InOrder(
+					str.EXPECT().CancelWrite(quic.ErrorCode(errorRequestCanceled)).Do(func(quic.ErrorCode) { close(canceled) }),
+					str.EXPECT().CancelRead(quic.ErrorCode(errorRequestCanceled)).Do(func(quic.ErrorCode) { close(done) }),
+				)
+				str.EXPECT().CancelWrite(gomock.Any()).MaxTimes(1)
 				str.EXPECT().Read(gomock.Any()).DoAndReturn(func([]byte) (int, error) {
 					cancel()
+					<-canceled
 					return 0, errors.New("test done")
 				})
 				_, err := client.RoundTrip(req)
@@ -375,7 +377,10 @@ var _ = Describe("Client", func() {
 				str.EXPECT().Write(gomock.Any()).DoAndReturn(func(p []byte) (int, error) {
 					return buf.Write(p)
 				})
-				str.EXPECT().Close()
+				gomock.InOrder(
+					str.EXPECT().Close(),
+					str.EXPECT().CancelWrite(gomock.Any()).MaxTimes(1), // when the Read errors
+				)
 				str.EXPECT().Read(gomock.Any()).Return(0, errors.New("test done"))
 				_, err := client.RoundTrip(request)
 				Expect(err).To(MatchError("test done"))
@@ -390,7 +395,10 @@ var _ = Describe("Client", func() {
 				str.EXPECT().Write(gomock.Any()).DoAndReturn(func(p []byte) (int, error) {
 					return buf.Write(p)
 				})
-				str.EXPECT().Close()
+				gomock.InOrder(
+					str.EXPECT().Close(),
+					str.EXPECT().CancelWrite(gomock.Any()).MaxTimes(1), // when the Read errors
+				)
 				str.EXPECT().Read(gomock.Any()).Return(0, errors.New("test done"))
 				_, err := client.RoundTrip(request)
 				Expect(err).To(MatchError("test done"))

@@ -236,7 +236,7 @@ func (h *sentPacketHandler) ReceivedAck(ackFrame *wire.AckFrame, withPacketNumbe
 		if p.LargestAcked != protocol.InvalidPacketNumber && encLevel == protocol.Encryption1RTT {
 			h.lowestNotConfirmedAcked = utils.MaxPacketNumber(h.lowestNotConfirmedAcked, p.LargestAcked+1)
 		}
-		if err := h.onPacketAcked(p, rcvTime); err != nil {
+		if err := h.onPacketAcked(p); err != nil {
 			return err
 		}
 		if p.includedInBytesInFlight {
@@ -493,7 +493,7 @@ func (h *sentPacketHandler) GetLossDetectionTimeout() time.Time {
 	return h.alarm
 }
 
-func (h *sentPacketHandler) onPacketAcked(p *Packet, rcvTime time.Time) error {
+func (h *sentPacketHandler) onPacketAcked(p *Packet) error {
 	pnSpace := h.getPacketNumberSpace(p.EncryptionLevel)
 	if packet := pnSpace.history.GetPacket(p.PacketNumber); packet == nil {
 		return nil
@@ -501,7 +501,7 @@ func (h *sentPacketHandler) onPacketAcked(p *Packet, rcvTime time.Time) error {
 
 	for _, f := range p.Frames {
 		if f.OnAcked != nil {
-			f.OnAcked()
+			f.OnAcked(f.Frame)
 		}
 	}
 	if p.includedInBytesInFlight {

@@ -87,7 +87,7 @@ func (r *handshakeRunner) OnHandshakeComplete()                 { r.onHandshakeC
 type closeError struct {
 	err       error
 	remote    bool
-	sendClose bool
+	immediate bool
 }
 
 var errCloseForRecreating = errors.New("closing session in order to recreate it")
@@ -131,12 +131,11 @@ type session struct {
 	receivedPackets  chan *receivedPacket
 	sendingScheduled chan struct{}
 
-	closeOnce sync.Once
-	closed    utils.AtomicBool
+	closeOnce          sync.Once
+	closedSessionMutex sync.Mutex
+	closedSession      closedSession
 	// closeChan is used to notify the run loop that it should terminate
-	closeChan                 chan closeError
-	connectionClosePacket     *packedPacket
-	packetsReceivedAfterClose int
+	closeChan chan closeError
 
 	ctx                context.Context
 	ctxCancel          context.CancelFunc
@@ -253,9 +252,7 @@ var newSession = func(
 	)
 	s.cryptoStreamManager = newCryptoStreamManager(cs, initialStream, handshakeStream, oneRTTStream)
 
-	if err := s.postSetup(); err != nil {
-		return nil, err
-	}
+	s.postSetup()
 	s.unpacker = newPacketUnpacker(cs, s.version)
 	return s, nil
 }
@@ -348,7 +345,8 @@ var newClientSession = func(
 			s.packer.SetToken(token.data)
 		}
 	}
-	return s, s.postSetup()
+	s.postSetup()
+	return s, nil
 }
 
 func (s *session) preSetup() {
@@ -372,7 +370,7 @@ func (s *session) preSetup() {
 	}
 }
 
-func (s *session) postSetup() error {
+func (s *session) postSetup() {
 	s.receivedPackets = make(chan *receivedPacket, protocol.MaxSessionUnprocessedPackets)
 	s.closeChan = make(chan closeError, 1)
 	s.sendingScheduled = make(chan struct{}, 1)
@@ -386,7 +384,6 @@ func (s *session) postSetup() error {
 	s.sessionCreationTime = now
 
 	s.windowUpdateQueue = newWindowUpdateQueue(s.streamsMap, s.connFlowController, s.framer.QueueControlFrame)
-	return nil
 }
 
 // run the session main loop
@@ -487,7 +484,6 @@ runLoop:
 	}
 
 	s.handleCloseError(closeErr)
-	s.closed.Set(true)
 	s.logger.Infof("Connection %s closed.", s.srcConnID)
 	s.cryptoStreamHandler.Close()
 	s.sendQueue.Close()
@@ -612,7 +608,7 @@ func (s *session) handleSinglePacket(p *receivedPacket, hdr *wire.Header) bool /
 	}()
 
 	if hdr.Type == protocol.PacketTypeRetry {
-		return s.handleRetryPacket(p, hdr)
+		return s.handleRetryPacket(hdr)
 	}
 
 	// The server can change the source connection ID with the first Handshake packet.
@@ -658,7 +654,7 @@ func (s *session) handleSinglePacket(p *receivedPacket, hdr *wire.Header) bool /
 	return true
 }
 
-func (s *session) handleRetryPacket(p *receivedPacket, hdr *wire.Header) bool /* was this a valid Retry */ {
+func (s *session) handleRetryPacket(hdr *wire.Header) bool /* was this a valid Retry */ {
 	if s.perspective == protocol.PerspectiveServer {
 		s.logger.Debugf("Ignoring Retry.")
 		return false
@@ -765,7 +761,7 @@ func (s *session) handleFrame(f wire.Frame, pn protocol.PacketNumber, encLevel p
 	case *wire.CryptoFrame:
 		err = s.handleCryptoFrame(frame, encLevel)
 	case *wire.StreamFrame:
-		err = s.handleStreamFrame(frame, encLevel)
+		err = s.handleStreamFrame(frame)
 	case *wire.AckFrame:
 		err = s.handleAckFrame(frame, pn, encLevel)
 	case *wire.ConnectionCloseFrame:
@@ -803,32 +799,11 @@ func (s *session) handleFrame(f wire.Frame, pn protocol.PacketNumber, encLevel p
 
 // handlePacket is called by the server with a new packet
 func (s *session) handlePacket(p *receivedPacket) {
-	if s.closed.Get() {
-		s.handlePacketAfterClosed(p)
-	}
 	// Discard packets once the amount of queued packets is larger than
 	// the channel size, protocol.MaxSessionUnprocessedPackets
 	select {
 	case s.receivedPackets <- p:
 	default:
-	}
-}
-
-func (s *session) handlePacketAfterClosed(p *receivedPacket) {
-	s.packetsReceivedAfterClose++
-	if s.connectionClosePacket == nil {
-		return
-	}
-	// exponential backoff
-	// only send a CONNECTION_CLOSE for the 1st, 2nd, 4th, 8th, 16th, ... packet arriving
-	for n := s.packetsReceivedAfterClose; n > 1; n = n / 2 {
-		if n%2 != 0 {
-			return
-		}
-	}
-	s.logger.Debugf("Received %d packets after sending CONNECTION_CLOSE. Retransmitting.", s.packetsReceivedAfterClose)
-	if err := s.conn.Write(s.connectionClosePacket.raw); err != nil {
-		s.logger.Debugf("Error retransmitting CONNECTION_CLOSE: %s", err)
 	}
 }
 
@@ -854,7 +829,7 @@ func (s *session) handleCryptoFrame(frame *wire.CryptoFrame, encLevel protocol.E
 	return nil
 }
 
-func (s *session) handleStreamFrame(frame *wire.StreamFrame, encLevel protocol.EncryptionLevel) error {
+func (s *session) handleStreamFrame(frame *wire.StreamFrame) error {
 	str, err := s.streamsMap.GetOrOpenReceiveStream(frame.StreamID)
 	if err != nil {
 		return err
@@ -946,13 +921,17 @@ func (s *session) closeLocal(e error) {
 		} else {
 			s.logger.Errorf("Closing session with error: %s", e)
 		}
-		s.sessionRunner.Retire(s.srcConnID)
-		s.closeChan <- closeError{err: e, sendClose: true, remote: false}
+		s.closeChan <- closeError{err: e, remote: false}
 	})
 }
 
 // destroy closes the session without sending the error on the wire
 func (s *session) destroy(e error) {
+	s.closedSessionMutex.Lock()
+	if s.closedSession != nil {
+		s.closedSession.destroy()
+	}
+	s.closedSessionMutex.Unlock()
 	s.destroyImpl(e)
 	<-s.ctx.Done()
 }
@@ -965,7 +944,7 @@ func (s *session) destroyImpl(e error) {
 			s.logger.Errorf("Destroying session %s with error: %s", s.destConnID, e)
 		}
 		s.sessionRunner.Remove(s.srcConnID)
-		s.closeChan <- closeError{err: e, sendClose: false, remote: false}
+		s.closeChan <- closeError{err: e, immediate: true, remote: false}
 	})
 }
 
@@ -980,7 +959,6 @@ func (s *session) closeForRecreating() protocol.PacketNumber {
 func (s *session) closeRemote(e error) {
 	s.closeOnce.Do(func() {
 		s.logger.Errorf("Peer closed session with error: %s", e)
-		s.sessionRunner.Remove(s.srcConnID)
 		s.closeChan <- closeError{err: e, remote: true}
 	})
 }
@@ -1012,16 +990,24 @@ func (s *session) handleCloseError(closeErr closeError) {
 
 	s.streamsMap.CloseWithError(quicErr)
 
-	if !closeErr.sendClose {
+	if closeErr.immediate {
 		return
 	}
+	s.sessionRunner.Retire(s.srcConnID)
 	// If this is a remote close we're done here
 	if closeErr.remote {
+		s.closedSessionMutex.Lock()
+		s.closedSession = newClosedRemoteSession(s.receivedPackets)
+		s.closedSessionMutex.Unlock()
 		return
 	}
-	if err := s.sendConnectionClose(quicErr); err != nil {
+	connClosePacket, err := s.sendConnectionClose(quicErr)
+	if err != nil {
 		s.logger.Debugf("Error sending CONNECTION_CLOSE: %s", err)
 	}
+	s.closedSessionMutex.Lock()
+	s.closedSession = newClosedLocalSession(s.conn, s.receivedPackets, connClosePacket, s.logger)
+	s.closedSessionMutex.Unlock()
 }
 
 func (s *session) dropEncryptionLevel(encLevel protocol.EncryptionLevel) {
@@ -1206,7 +1192,7 @@ func (s *session) sendPackedPacket(packet *packedPacket) {
 	s.sendQueue.Send(packet)
 }
 
-func (s *session) sendConnectionClose(quicErr *qerr.QuicError) error {
+func (s *session) sendConnectionClose(quicErr *qerr.QuicError) ([]byte, error) {
 	var reason string
 	// don't send details of crypto errors
 	if !quicErr.IsCryptoError() {
@@ -1217,11 +1203,10 @@ func (s *session) sendConnectionClose(quicErr *qerr.QuicError) error {
 		ReasonPhrase: reason,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	s.connectionClosePacket = packet
 	s.logPacket(packet)
-	return s.conn.Write(packet.raw)
+	return packet.raw, s.conn.Write(packet.raw)
 }
 
 func (s *session) logPacket(packet *packedPacket) {
