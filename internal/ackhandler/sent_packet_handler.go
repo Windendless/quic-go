@@ -2,7 +2,6 @@ package ackhandler
 
 import (
 	"fmt"
-	"log"
 	"math"
 	"time"
 
@@ -105,7 +104,7 @@ func NewSentPacketHandler(
 			protocol.DefaultMaxCongestionWindow,
 		)
 	} else {
-		log.Printf("quic-go: bbr is enabled.")
+		//log.Printf("quic-go: bbr is enabled.")
 		cc = congestion.NewBBRSender(congestion.DefaultClock{},
 			rttStats,
 			protocol.InitialCongestionWindow,
