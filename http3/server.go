@@ -10,13 +10,11 @@ import (
 	"net"
 	"net/http"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/marten-seemann/qpack"
 	"github.com/onsi/ginkgo"
@@ -24,11 +22,11 @@ import (
 
 // allows mocking of quic.Listen and quic.ListenAddr
 var (
-	quicListen     = quic.Listen
-	quicListenAddr = quic.ListenAddr
+	quicListen     = quic.ListenEarly
+	quicListenAddr = quic.ListenAddrEarly
 )
 
-const nextProtoH3 = "h3-22"
+const nextProtoH3 = "h3-24"
 
 type requestError struct {
 	err       error
@@ -55,10 +53,8 @@ type Server struct {
 	port uint32 // used atomically
 
 	mutex     sync.Mutex
-	listeners map[*quic.Listener]struct{}
+	listeners map[*quic.EarlyListener]struct{}
 	closed    utils.AtomicBool
-
-	supportedVersionsAsString string
 
 	logger utils.Logger
 }
@@ -117,12 +113,13 @@ func (s *Server) serveImpl(tlsConf *tls.Config, conn net.PacketConn) error {
 			if err != nil || conf == nil {
 				return conf, err
 			}
+			conf = conf.Clone()
 			conf.NextProtos = []string{nextProtoH3}
 			return conf, nil
 		}
 	}
 
-	var ln quic.Listener
+	var ln quic.EarlyListener
 	var err error
 	if conn == nil {
 		ln, err = quicListenAddr(s.Addr, tlsConf, s.QuicConfig)
@@ -147,22 +144,22 @@ func (s *Server) serveImpl(tlsConf *tls.Config, conn net.PacketConn) error {
 // We store a pointer to interface in the map set. This is safe because we only
 // call trackListener via Serve and can track+defer untrack the same pointer to
 // local variable there. We never need to compare a Listener from another caller.
-func (s *Server) addListener(l *quic.Listener) {
+func (s *Server) addListener(l *quic.EarlyListener) {
 	s.mutex.Lock()
 	if s.listeners == nil {
-		s.listeners = make(map[*quic.Listener]struct{})
+		s.listeners = make(map[*quic.EarlyListener]struct{})
 	}
 	s.listeners[l] = struct{}{}
 	s.mutex.Unlock()
 }
 
-func (s *Server) removeListener(l *quic.Listener) {
+func (s *Server) removeListener(l *quic.EarlyListener) {
 	s.mutex.Lock()
 	delete(s.listeners, l)
 	s.mutex.Unlock()
 }
 
-func (s *Server) handleConn(sess quic.Session) {
+func (s *Server) handleConn(sess quic.EarlySession) {
 	// TODO: accept control streams
 	decoder := qpack.NewDecoder(nil)
 
@@ -176,6 +173,8 @@ func (s *Server) handleConn(sess quic.Session) {
 	(&settingsFrame{}).Write(buf)
 	str.Write(buf.Bytes())
 
+	// Process all requests immediately.
+	// It's the client's responsibility to decide which requests are eligible for 0-RTT.
 	for {
 		str, err := sess.AcceptStream(context.Background())
 		if err != nil {
@@ -184,7 +183,10 @@ func (s *Server) handleConn(sess quic.Session) {
 		}
 		go func() {
 			defer ginkgo.GinkgoRecover()
-			if rerr := s.handleRequest(str, decoder); rerr.err != nil || rerr.streamErr != 0 || rerr.connErr != 0 {
+			rerr := s.handleRequest(sess, str, decoder, func() {
+				sess.CloseWithError(quic.ErrorCode(errorFrameUnexpected), "")
+			})
+			if rerr.err != nil || rerr.streamErr != 0 || rerr.connErr != 0 {
 				s.logger.Debugf("Handling request failed: %s", err)
 				if rerr.streamErr != 0 {
 					str.CancelWrite(quic.ErrorCode(rerr.streamErr))
@@ -210,14 +212,14 @@ func (s *Server) maxHeaderBytes() uint64 {
 	return uint64(s.Server.MaxHeaderBytes)
 }
 
-func (s *Server) handleRequest(str quic.Stream, decoder *qpack.Decoder) requestError {
+func (s *Server) handleRequest(sess quic.Session, str quic.Stream, decoder *qpack.Decoder, onFrameError func()) requestError {
 	frame, err := parseNextFrame(str)
 	if err != nil {
 		return newStreamError(errorRequestIncomplete, err)
 	}
 	hf, ok := frame.(*headersFrame)
 	if !ok {
-		return newConnError(errorUnexpectedFrame, errors.New("expected first frame to be a HEADERS frame"))
+		return newConnError(errorFrameUnexpected, errors.New("expected first frame to be a HEADERS frame"))
 	}
 	if hf.Length > s.maxHeaderBytes() {
 		return newStreamError(errorFrameError, fmt.Errorf("HEADERS frame too large: %d bytes (max: %d)", hf.Length, s.maxHeaderBytes()))
@@ -236,7 +238,9 @@ func (s *Server) handleRequest(str quic.Stream, decoder *qpack.Decoder) requestE
 		// TODO: use the right error code
 		return newStreamError(errorGeneralProtocolError, err)
 	}
-	req.Body = newRequestBody(str)
+
+	req.RemoteAddr = sess.RemoteAddr().String()
+	req.Body = newRequestBody(str, onFrameError)
 
 	if s.logger.Debug() {
 		s.logger.Infof("%s %s%s, on stream %d", req.Method, req.Host, req.RequestURI, str.StreamID())
@@ -326,15 +330,7 @@ func (s *Server) SetQuicHeaders(hdr http.Header) error {
 		atomic.StoreUint32(&s.port, port)
 	}
 
-	if s.supportedVersionsAsString == "" {
-		var versions []string
-		for _, v := range protocol.SupportedVersions {
-			versions = append(versions, v.ToAltSvc())
-		}
-		s.supportedVersionsAsString = strings.Join(versions, ",")
-	}
-
-	hdr.Add("Alt-Svc", fmt.Sprintf(`%s=":%d"; ma=2592000; quic="%s"`, nextProtoH3, port, s.supportedVersionsAsString))
+	hdr.Add("Alt-Svc", fmt.Sprintf(`%s=":%d"; ma=2592000`, nextProtoH3, port))
 
 	return nil
 }

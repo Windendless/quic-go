@@ -75,6 +75,13 @@ var _ = Describe("Updatable AEAD", func() {
 					Expect(opened).To(Equal(msg))
 				})
 
+				It("saves the first packet number", func() {
+					client.Seal(nil, msg, 0x1337, ad)
+					Expect(client.FirstPacketNumber()).To(Equal(protocol.PacketNumber(0x1337)))
+					client.Seal(nil, msg, 0x1338, ad)
+					Expect(client.FirstPacketNumber()).To(Equal(protocol.PacketNumber(0x1337)))
+				})
+
 				It("fails to open a message if the associated data is not the same", func() {
 					encrypted := client.Seal(nil, msg, 0x1337, ad)
 					_, err := server.Open(nil, encrypted, time.Now(), 0x1337, protocol.KeyPhaseZero, []byte("wrong ad"))
@@ -151,7 +158,7 @@ var _ = Describe("Updatable AEAD", func() {
 						It("drops keys 3 PTOs after a key update", func() {
 							now := time.Now()
 							rttStats.UpdateRTT(10*time.Millisecond, 0, now)
-							pto := rttStats.PTO()
+							pto := rttStats.PTO(true)
 							encrypted01 := client.Seal(nil, msg, 0x42, ad)
 							encrypted02 := client.Seal(nil, msg, 0x43, ad)
 							// receive the first packet with key phase 0

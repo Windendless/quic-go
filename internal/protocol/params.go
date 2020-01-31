@@ -8,16 +8,8 @@ const MaxPacketSizeIPv4 = 1252
 // MaxPacketSizeIPv6 is the maximum packet size that we use for sending IPv6 packets.
 const MaxPacketSizeIPv6 = 1232
 
-const defaultMaxCongestionWindowPackets = 1000
-
-// DefaultMaxCongestionWindow is the default for the max congestion window
-const DefaultMaxCongestionWindow ByteCount = defaultMaxCongestionWindowPackets * DefaultTCPMSS
-
-// DefaultBBRMaxCongestionWindow is the default for the max congestion window in BBR algorithm
-const DefaultBBRMaxCongestionWindow ByteCount = 2000 * DefaultTCPMSS
-
-// InitialCongestionWindow is the initial congestion window in QUIC packets
-const InitialCongestionWindow ByteCount = 32 * DefaultTCPMSS
+// MaxCongestionWindowPackets is the maximum congestion window in packet.
+const MaxCongestionWindowPackets = 10000
 
 // MaxUndecryptablePackets limits the number of undecryptable packets that are queued in the session.
 const MaxUndecryptablePackets = 10
@@ -48,7 +40,7 @@ const DefaultMaxIncomingStreams = 100
 const DefaultMaxIncomingUniStreams = 100
 
 // MaxSessionUnprocessedPackets is the max number of packets stored in each session that are not yet processed.
-const MaxSessionUnprocessedPackets = defaultMaxCongestionWindowPackets
+const MaxSessionUnprocessedPackets = MaxCongestionWindowPackets
 
 // SkipPacketAveragePeriodLength is the average period length in which one packet number is skipped to prevent an Optimistic ACK attack
 const SkipPacketAveragePeriodLength PacketNumber = 500
@@ -69,7 +61,7 @@ const RetryTokenValidity = 10 * time.Second
 // MaxOutstandingSentPackets is maximum number of packets saved for retransmission.
 // When reached, it imposes a soft limit on sending new packets:
 // Sending ACKs and retransmission is still allowed, but now new regular packets can be sent.
-const MaxOutstandingSentPackets = 2 * defaultMaxCongestionWindowPackets
+const MaxOutstandingSentPackets = 2 * MaxCongestionWindowPackets
 
 // MaxTrackedSentPackets is maximum number of sent packets saved for retransmission.
 // When reached, no more packets will be sent.
@@ -101,6 +93,10 @@ const DefaultIdleTimeout = 30 * time.Second
 
 // DefaultHandshakeTimeout is the default timeout for a connection until the crypto handshake succeeds.
 const DefaultHandshakeTimeout = 10 * time.Second
+
+// MaxKeepAliveInterval is the maximum time until we send a packet to keep a connection alive.
+// It should be shorter than the time that NATs clear their mapping.
+const MaxKeepAliveInterval = 20 * time.Second
 
 // RetiredConnectionIDDeleteTimeout is the time we keep closed sessions around in order to retransmit the CONNECTION_CLOSE.
 // after this time all information about the old connection will be deleted
@@ -135,6 +131,16 @@ const MinPacingDelay time.Duration = 100 * time.Microsecond
 // DefaultConnectionIDLength is the connection ID length that is used for multiplexed connections
 // if no other value is configured.
 const DefaultConnectionIDLength = 4
+
+// MaxActiveConnectionIDs is the number of connection IDs that we're storing.
+const MaxActiveConnectionIDs = 4
+
+// MaxIssuedConnectionIDs is the maximum number of connection IDs that we're issuing at the same time.
+const MaxIssuedConnectionIDs = 6
+
+// PacketsPerConnectionID is the number of packets we send using one connection ID.
+// If the peer provices us with enough new connection IDs, we switch to a new connection ID.
+const PacketsPerConnectionID = 10000
 
 // AckDelayExponent is the ack delay exponent used when sending ACKs.
 const AckDelayExponent = 3

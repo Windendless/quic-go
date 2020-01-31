@@ -61,36 +61,82 @@ func newPacketHandlerMap(
 		logger:                     logger,
 	}
 	go m.listen()
+
+	if logger.Debug() {
+		go m.logUsage()
+	}
+
 	return m
 }
 
-func (h *packetHandlerMap) Add(id protocol.ConnectionID, handler packetHandler) {
+func (h *packetHandlerMap) logUsage() {
+	ticker := time.NewTicker(2 * time.Second)
+	var printedZero bool
+	for {
+		select {
+		case <-h.listening:
+			return
+		case <-ticker.C:
+		}
+
+		h.mutex.Lock()
+		numHandlers := len(h.handlers)
+		numTokens := len(h.resetTokens)
+		h.mutex.Unlock()
+		// If the number tracked handlers and tokens is zero, only print it a single time.
+		hasZero := numHandlers == 0 && numTokens == 0
+		if !hasZero || (hasZero && !printedZero) {
+			h.logger.Debugf("Tracking %d connection IDs and %d reset tokens.\n", numHandlers, numTokens)
+			printedZero = false
+			if hasZero {
+				printedZero = true
+			}
+		}
+	}
+}
+
+func (h *packetHandlerMap) Add(id protocol.ConnectionID, handler packetHandler) [16]byte {
 	h.mutex.Lock()
 	h.handlers[string(id)] = handler
 	h.mutex.Unlock()
+	return h.GetStatelessResetToken(id)
+}
+
+func (h *packetHandlerMap) AddIfNotTaken(id protocol.ConnectionID, handler packetHandler) bool /* was added */ {
+	sid := string(id)
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
+	if _, ok := h.handlers[sid]; !ok {
+		h.handlers[sid] = handler
+		return true
+	}
+	return false
 }
 
 func (h *packetHandlerMap) Remove(id protocol.ConnectionID) {
 	h.mutex.Lock()
-	h.removeByConnectionIDAsString(string(id))
+	delete(h.handlers, string(id))
 	h.mutex.Unlock()
 }
 
-func (h *packetHandlerMap) removeByConnectionIDAsString(id string) {
-	delete(h.handlers, id)
-}
-
 func (h *packetHandlerMap) Retire(id protocol.ConnectionID) {
-	h.retireByConnectionIDAsString(string(id))
-}
-
-func (h *packetHandlerMap) retireByConnectionIDAsString(id string) {
 	time.AfterFunc(h.deleteRetiredSessionsAfter, func() {
 		h.mutex.Lock()
-		if sess, ok := h.handlers[id]; ok {
-			sess.destroy(errors.New("deleting"))
-		}
-		h.removeByConnectionIDAsString(id)
+		delete(h.handlers, string(id))
+		h.mutex.Unlock()
+	})
+}
+
+func (h *packetHandlerMap) ReplaceWithClosed(id protocol.ConnectionID, handler packetHandler) {
+	h.mutex.Lock()
+	h.handlers[string(id)] = handler
+	h.mutex.Unlock()
+
+	time.AfterFunc(h.deleteRetiredSessionsAfter, func() {
+		h.mutex.Lock()
+		handler.shutdown()
+		delete(h.handlers, string(id))
 		h.mutex.Unlock()
 	})
 }
@@ -107,6 +153,14 @@ func (h *packetHandlerMap) RemoveResetToken(token [16]byte) {
 	h.mutex.Unlock()
 }
 
+func (h *packetHandlerMap) RetireResetToken(token [16]byte) {
+	time.AfterFunc(h.deleteRetiredSessionsAfter, func() {
+		h.mutex.Lock()
+		delete(h.resetTokens, token)
+		h.mutex.Unlock()
+	})
+}
+
 func (h *packetHandlerMap) SetServer(s unknownPacketHandler) {
 	h.mutex.Lock()
 	h.server = s
@@ -121,8 +175,8 @@ func (h *packetHandlerMap) CloseServer() {
 		if handler.getPerspective() == protocol.PerspectiveServer {
 			wg.Add(1)
 			go func(handler packetHandler) {
-				// session.Close() blocks until the CONNECTION_CLOSE has been sent and the run-loop has stopped
-				_ = handler.Close()
+				// blocks until the CONNECTION_CLOSE has been sent and the run-loop has stopped
+				handler.shutdown()
 				wg.Done()
 			}(handler)
 		}
@@ -131,8 +185,9 @@ func (h *packetHandlerMap) CloseServer() {
 	wg.Wait()
 }
 
-// Close the underlying connection and wait until listen() has returned.
-func (h *packetHandlerMap) Close() error {
+// Destroy the underlying connection and wait until listen() has returned.
+// It does not close active sessions.
+func (h *packetHandlerMap) Destroy() error {
 	if err := h.conn.Close(); err != nil {
 		return err
 	}

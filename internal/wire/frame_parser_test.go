@@ -271,9 +271,18 @@ var _ = Describe("Frame parsing", func() {
 		Expect(frame).To(Equal(f))
 	})
 
+	It("unpacks HANDSHAKE_DONE frames", func() {
+		f := &HandshakeDoneFrame{}
+		buf := &bytes.Buffer{}
+		Expect(f.Write(buf, versionIETFFrames)).To(Succeed())
+		frame, err := parser.ParseNext(bytes.NewReader(buf.Bytes()), protocol.Encryption1RTT)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(frame).To(Equal(f))
+	})
+
 	It("errors on invalid type", func() {
 		_, err := parser.ParseNext(bytes.NewReader([]byte{0x42}), protocol.Encryption1RTT)
-		Expect(err).To(MatchError("FRAME_ENCODING_ERROR: unknown type byte 0x42"))
+		Expect(err).To(MatchError("FRAME_ENCODING_ERROR (frame type: 0x42): unknown frame type"))
 	})
 
 	It("errors on invalid frames", func() {
@@ -308,6 +317,7 @@ var _ = Describe("Frame parsing", func() {
 			&PathChallengeFrame{},
 			&PathResponseFrame{},
 			&ConnectionCloseFrame{},
+			&HandshakeDoneFrame{},
 		}
 
 		var framesSerialized [][]byte
@@ -321,11 +331,11 @@ var _ = Describe("Frame parsing", func() {
 			}
 		})
 
-		It("rejects all frames but ACK, CRYPTO and CONNECTION_CLOSE in Initial packets", func() {
+		It("rejects all frames but ACK, CRYPTO, PING and CONNECTION_CLOSE in Initial packets", func() {
 			for i, b := range framesSerialized {
 				_, err := parser.ParseNext(bytes.NewReader(b), protocol.EncryptionInitial)
 				switch frames[i].(type) {
-				case *AckFrame, *ConnectionCloseFrame, *CryptoFrame:
+				case *AckFrame, *ConnectionCloseFrame, *CryptoFrame, *PingFrame:
 					Expect(err).ToNot(HaveOccurred())
 				default:
 					Expect(err).To(HaveOccurred())
@@ -334,15 +344,28 @@ var _ = Describe("Frame parsing", func() {
 			}
 		})
 
-		It("rejects all frames but ACK, CRYPTO and CONNECTION_CLOSE in Handshake packets", func() {
+		It("rejects all frames but ACK, CRYPTO, PING and CONNECTION_CLOSE in Handshake packets", func() {
 			for i, b := range framesSerialized {
 				_, err := parser.ParseNext(bytes.NewReader(b), protocol.EncryptionHandshake)
 				switch frames[i].(type) {
-				case *AckFrame, *ConnectionCloseFrame, *CryptoFrame:
+				case *AckFrame, *ConnectionCloseFrame, *CryptoFrame, *PingFrame:
 					Expect(err).ToNot(HaveOccurred())
 				default:
 					Expect(err).To(HaveOccurred())
 					Expect(err.Error()).To(ContainSubstring("not allowed at encryption level Handshake"))
+				}
+			}
+		})
+
+		It("rejects all frames but ACK, CRYPTO, CONNECTION_CLOSE, NEW_TOKEN, PATH_RESPONSE and RETIRE_CONNECTION_ID in 0-RTT packets", func() {
+			for i, b := range framesSerialized {
+				_, err := parser.ParseNext(bytes.NewReader(b), protocol.Encryption0RTT)
+				switch frames[i].(type) {
+				case *AckFrame, *ConnectionCloseFrame, *CryptoFrame, *NewTokenFrame, *PathResponseFrame, *RetireConnectionIDFrame:
+					Expect(err).To(HaveOccurred())
+					Expect(err.Error()).To(ContainSubstring("not allowed at encryption level 0-RTT"))
+				default:
+					Expect(err).ToNot(HaveOccurred())
 				}
 			}
 		})

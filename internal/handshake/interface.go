@@ -1,7 +1,6 @@
 package handshake
 
 import (
-	"crypto/tls"
 	"errors"
 	"io"
 	"time"
@@ -11,16 +10,19 @@ import (
 )
 
 var (
-	// ErrOpenerNotYetAvailable is returned when an opener is requested for an encryption level,
+	// ErrKeysNotYetAvailable is returned when an opener or a sealer is requested for an encryption level,
 	// but the corresponding opener has not yet been initialized
 	// This can happen when packets arrive out of order.
-	ErrOpenerNotYetAvailable = errors.New("CryptoSetup: opener at this encryption level not yet available")
+	ErrKeysNotYetAvailable = errors.New("CryptoSetup: keys at this encryption level not yet available")
 	// ErrKeysDropped is returned when an opener or a sealer is requested for an encryption level,
 	// but the corresponding keys have already been dropped.
 	ErrKeysDropped = errors.New("CryptoSetup: keys were already dropped")
 	// ErrDecryptionFailed is returned when the AEAD fails to open the packet.
 	ErrDecryptionFailed = errors.New("decryption failed")
 )
+
+// ConnectionState contains information about the state of the connection.
+type ConnectionState = qtls.ConnectionState
 
 type headerDecryptor interface {
 	DecryptHeader(sample []byte, firstByte *byte, pnBytes []byte)
@@ -59,7 +61,7 @@ type tlsExtensionHandler interface {
 }
 
 type handshakeRunner interface {
-	OnReceivedParams([]byte)
+	OnReceivedParams(*TransportParameters)
 	OnHandshakeComplete()
 	OnError(error)
 	DropKeys(protocol.EncryptionLevel)
@@ -69,17 +71,20 @@ type handshakeRunner interface {
 type CryptoSetup interface {
 	RunHandshake()
 	io.Closer
-	ChangeConnectionID(protocol.ConnectionID) error
+	ChangeConnectionID(protocol.ConnectionID)
 
 	HandleMessage([]byte, protocol.EncryptionLevel) bool
 	SetLargest1RTTAcked(protocol.PacketNumber)
-	ConnectionState() tls.ConnectionState
+	DropHandshakeKeys()
+	ConnectionState() ConnectionState
 
 	GetInitialOpener() (LongHeaderOpener, error)
 	GetHandshakeOpener() (LongHeaderOpener, error)
+	Get0RTTOpener() (LongHeaderOpener, error)
 	Get1RTTOpener() (ShortHeaderOpener, error)
 
 	GetInitialSealer() (LongHeaderSealer, error)
 	GetHandshakeSealer() (LongHeaderSealer, error)
+	Get0RTTSealer() (LongHeaderSealer, error)
 	Get1RTTSealer() (ShortHeaderSealer, error)
 }

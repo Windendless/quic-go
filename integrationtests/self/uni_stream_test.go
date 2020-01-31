@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	quic "github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/integrationtests/tools/testserver"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 
 	. "github.com/onsi/ginkgo"
@@ -37,7 +36,7 @@ var _ = Describe("Unidirectional Streams", func() {
 	})
 
 	dataForStream := func(id protocol.StreamID) []byte {
-		return testserver.GeneratePRData(10 * int(id))
+		return GeneratePRData(10 * int(id))
 	}
 
 	runSendingPeer := func(sess quic.Session) {
@@ -76,7 +75,7 @@ var _ = Describe("Unidirectional Streams", func() {
 			sess, err := server.Accept(context.Background())
 			Expect(err).ToNot(HaveOccurred())
 			runReceivingPeer(sess)
-			sess.Close()
+			sess.CloseWithError(0, "")
 		}()
 
 		client, err := quic.DialAddr(

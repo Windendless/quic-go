@@ -62,7 +62,7 @@ var _ = Describe("Packet Handler Map", func() {
 		}
 		handler.server = nil
 		handler.mutex.Unlock()
-		handler.Close()
+		handler.Destroy()
 		Eventually(handler.listening).Should(BeClosed())
 	})
 
@@ -139,7 +139,6 @@ var _ = Describe("Packet Handler Map", func() {
 			connID := protocol.ConnectionID{1, 2, 3, 4, 5, 6, 7, 8}
 			sess := NewMockPacketHandler(mockCtrl)
 			handler.Add(connID, sess)
-			sess.EXPECT().destroy(gomock.Any())
 			handler.Retire(connID)
 			time.Sleep(scaleDuration(30 * time.Millisecond))
 			handler.handlePacket(nil, nil, getPacket(connID))
@@ -176,6 +175,12 @@ var _ = Describe("Packet Handler Map", func() {
 			conn.Close()
 			Eventually(done).Should(BeClosed())
 		})
+
+		It("says if a connection ID is already taken", func() {
+			connID := protocol.ConnectionID{1, 2, 3, 4, 5, 6, 7, 8}
+			Expect(handler.AddIfNotTaken(connID, NewMockPacketHandler(mockCtrl))).To(BeTrue())
+			Expect(handler.AddIfNotTaken(connID, NewMockPacketHandler(mockCtrl))).To(BeFalse())
+		})
 	})
 
 	Context("running a server", func() {
@@ -197,7 +202,7 @@ var _ = Describe("Packet Handler Map", func() {
 			clientSess.EXPECT().getPerspective().Return(protocol.PerspectiveClient)
 			serverSess := NewMockPacketHandler(mockCtrl)
 			serverSess.EXPECT().getPerspective().Return(protocol.PerspectiveServer)
-			serverSess.EXPECT().Close()
+			serverSess.EXPECT().shutdown()
 
 			handler.Add(protocol.ConnectionID{1, 1, 1, 1}, clientSess)
 			handler.Add(protocol.ConnectionID{2, 2, 2, 2}, serverSess)
@@ -250,22 +255,21 @@ var _ = Describe("Packet Handler Map", func() {
 				Eventually(destroyed).Should(BeClosed())
 			})
 
-			It("deletes reset tokens", func() {
+			It("retires reset tokens", func() {
 				handler.deleteRetiredSessionsAfter = scaleDuration(10 * time.Millisecond)
 				connID := protocol.ConnectionID{0xde, 0xad, 0xbe, 0xef, 0x42}
 				packetHandler := NewMockPacketHandler(mockCtrl)
 				handler.Add(connID, packetHandler)
 				token := [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 				handler.AddResetToken(token, NewMockPacketHandler(mockCtrl))
-				handler.RemoveResetToken(token)
+				handler.RetireResetToken(token)
 				packetHandler.EXPECT().handlePacket(gomock.Any())
 				p := append([]byte{0x40} /* short header packet */, connID.Bytes()...)
 				p = append(p, make([]byte, 50)...)
 				p = append(p, token[:]...)
+
+				time.Sleep(scaleDuration(30 * time.Millisecond))
 				handler.handlePacket(nil, nil, p)
-				// destroy() would be called from a separate go routine
-				// make sure we give it enough time to be called to cause an error here
-				time.Sleep(scaleDuration(25 * time.Millisecond))
 			})
 
 			It("ignores packets too small to contain a stateless reset", func() {
@@ -291,12 +295,18 @@ var _ = Describe("Packet Handler Map", func() {
 				statelessResetKey = key
 			})
 
+			It("generates stateless reset tokens when adding new sessions", func() {
+				connID1 := []byte{0xde, 0xad, 0xbe, 0xef}
+				connID2 := []byte{0xde, 0xca, 0xfb, 0xad}
+				token1 := handler.Add(connID1, nil)
+				Expect(handler.Add(connID1, nil)).To(Equal(token1))
+				Expect(handler.Add(connID2, nil)).ToNot(Equal(token1))
+			})
+
 			It("generates stateless reset tokens", func() {
 				connID1 := []byte{0xde, 0xad, 0xbe, 0xef}
 				connID2 := []byte{0xde, 0xca, 0xfb, 0xad}
-				token1 := handler.GetStatelessResetToken(connID1)
-				Expect(handler.GetStatelessResetToken(connID1)).To(Equal(token1))
-				Expect(handler.GetStatelessResetToken(connID2)).ToNot(Equal(token1))
+				Expect(handler.GetStatelessResetToken(connID1)).ToNot(Equal(handler.GetStatelessResetToken(connID2)))
 			})
 
 			It("sends stateless resets", func() {

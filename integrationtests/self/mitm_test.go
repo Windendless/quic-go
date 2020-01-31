@@ -13,7 +13,6 @@ import (
 
 	quic "github.com/lucas-clemente/quic-go"
 	quicproxy "github.com/lucas-clemente/quic-go/integrationtests/tools/proxy"
-	"github.com/lucas-clemente/quic-go/integrationtests/tools/testserver"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/qerr"
 	"github.com/lucas-clemente/quic-go/internal/testutils"
@@ -50,7 +49,7 @@ var _ = Describe("MITM test", func() {
 					Expect(err).ToNot(HaveOccurred())
 					str, err := serverSess.OpenUniStream()
 					Expect(err).ToNot(HaveOccurred())
-					_, err = str.Write(testserver.PRData)
+					_, err = str.Write(PRData)
 					Expect(err).ToNot(HaveOccurred())
 					Expect(str.Close()).To(Succeed())
 				}()
@@ -139,8 +138,8 @@ var _ = Describe("MITM test", func() {
 						Expect(err).ToNot(HaveOccurred())
 						data, err := ioutil.ReadAll(str)
 						Expect(err).ToNot(HaveOccurred())
-						Expect(data).To(Equal(testserver.PRData))
-						Expect(sess.Close()).To(Succeed())
+						Expect(data).To(Equal(PRData))
+						Expect(sess.CloseWithError(0, "")).To(Succeed())
 					}
 
 					It("downloads a message when the packets are injected towards the server", func() {
@@ -185,8 +184,8 @@ var _ = Describe("MITM test", func() {
 					Expect(err).ToNot(HaveOccurred())
 					data, err := ioutil.ReadAll(str)
 					Expect(err).ToNot(HaveOccurred())
-					Expect(data).To(Equal(testserver.PRData))
-					Expect(sess.Close()).To(Succeed())
+					Expect(data).To(Equal(PRData))
+					Expect(sess.CloseWithError(0, "")).To(Succeed())
 				}
 
 				Context("duplicating packets", func() {
@@ -223,7 +222,7 @@ var _ = Describe("MITM test", func() {
 
 					BeforeEach(func() {
 						numCorrupted = 0
-						serverConfig.IdleTimeout = idleTimeout
+						serverConfig.MaxIdleTimeout = idleTimeout
 					})
 
 					AfterEach(func() {
@@ -254,8 +253,7 @@ var _ = Describe("MITM test", func() {
 					It("downloads a message when packet are corrupted towards the client", func() {
 						dropCb := func(dir quicproxy.Direction, raw []byte) bool {
 							defer GinkgoRecover()
-							isRetry := raw[0]&0xc0 == 0xc0 // don't corrupt Retry packets
-							if dir == quicproxy.DirectionOutgoing && mrand.Intn(interval) == 0 && !isRetry {
+							if dir == quicproxy.DirectionOutgoing && mrand.Intn(interval) == 0 {
 								pos := mrand.Intn(len(raw))
 								raw[pos] = byte(mrand.Intn(256))
 								_, err := serverConn.WriteTo(raw, clientConn.LocalAddr())
