@@ -107,8 +107,6 @@ func NewSentPacketHandler(
 		//log.Printf("quic-go: bbr is enabled.")
 		cc = congestion.NewBBRSender(congestion.DefaultClock{},
 			rttStats,
-			protocol.InitialCongestionWindow,
-			protocol.DefaultBBRMaxCongestionWindow,
 			func() protocol.ByteCount {
 				return handler.bytesInFlight
 			},

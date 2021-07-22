@@ -22,7 +22,7 @@ var (
 
 	// Default maximum packet size used in the Linux TCP implementation.
 	// Used in QUIC for congestion window computations in bytes.
-	MaxSegmentSize = protocol.DefaultTCPMSS
+	MaxSegmentSize = maxDatagramSize
 
 	// Default initial rtt used before any samples are received.
 	InitialRtt = 100 * time.Millisecond
@@ -30,7 +30,7 @@ var (
 	// Constants based on TCP defaults.
 	// The minimum CWND to ensure delayed acks don't reduce bandwidth measurements.
 	// Does not inflate the pacing rate.
-	DefaultMinimumCongestionWindow = 4 * protocol.DefaultTCPMSS
+	DefaultMinimumCongestionWindow = 4 * maxDatagramSize
 
 	// The gain used for the STARTUP, equal to 2/ln(2).
 	DefaultHighGain = 2.885
@@ -228,7 +228,12 @@ type bbrSender struct {
 	alwaysGetBwSampleWhenAcked bool
 }
 
-func NewBBRSender(clock Clock, rttStats *RTTStats, initialCongestionWindow, maxCongestionWindow protocol.ByteCount, getBytesInFlight func() protocol.ByteCount) *bbrSender {
+// NewBBRSender makes a new bbr sender
+func NewBBRSender(clock Clock, rttStats *RTTStats, getBytesInFlight func() protocol.ByteCount) *bbrSender {
+	return newBBRSender(clock, rttStats, initialCongestionWindow, maxCongestionWindow, getBytesInFlight)
+}
+
+func newBBRSender(clock Clock, rttStats *RTTStats, initialCongestionWindow, maxCongestionWindow protocol.ByteCount, getBytesInFlight func() protocol.ByteCount) *bbrSender {
 	return &bbrSender{
 		rttStats:                  rttStats,
 		GetBytesInFlight:          getBytesInFlight,
