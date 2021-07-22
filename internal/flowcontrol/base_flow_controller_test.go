@@ -5,7 +5,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/congestion"
+	"github.com/lucas-clemente/quic-go/internal/utils"
+
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -27,7 +28,7 @@ var _ = Describe("Base Flow controller", func() {
 
 	BeforeEach(func() {
 		controller = &baseFlowController{}
-		controller.rttStats = &congestion.RTTStats{}
+		controller.rttStats = &utils.RTTStats{}
 	})
 
 	Context("send flow control", func() {
@@ -101,7 +102,7 @@ var _ = Describe("Base Flow controller", func() {
 
 		It("adds bytes read", func() {
 			controller.bytesRead = 5
-			controller.AddBytesRead(6)
+			controller.addBytesRead(6)
 			Expect(controller.bytesRead).To(Equal(protocol.ByteCount(5 + 6)))
 		})
 
@@ -145,8 +146,8 @@ var _ = Describe("Base Flow controller", func() {
 
 			It("doesn't increase the window size when no RTT estimate is available", func() {
 				setRtt(0)
-				controller.startNewAutoTuningEpoch()
-				controller.AddBytesRead(400)
+				controller.startNewAutoTuningEpoch(time.Now())
+				controller.addBytesRead(400)
 				offset := controller.getWindowUpdate()
 				Expect(offset).ToNot(BeZero()) // make sure a window update is sent
 				Expect(controller.receiveWindowSize).To(Equal(oldWindowSize))
@@ -154,14 +155,14 @@ var _ = Describe("Base Flow controller", func() {
 
 			It("increases the window size if read so fast that the window would be consumed in less than 4 RTTs", func() {
 				bytesRead := controller.bytesRead
-				rtt := scaleDuration(20 * time.Millisecond)
+				rtt := scaleDuration(50 * time.Millisecond)
 				setRtt(rtt)
 				// consume more than 2/3 of the window...
 				dataRead := receiveWindowSize*2/3 + 1
 				// ... in 4*2/3 of the RTT
 				controller.epochStartOffset = controller.bytesRead
 				controller.epochStartTime = time.Now().Add(-rtt * 4 * 2 / 3)
-				controller.AddBytesRead(dataRead)
+				controller.addBytesRead(dataRead)
 				offset := controller.getWindowUpdate()
 				Expect(offset).ToNot(BeZero())
 				// check that the window size was increased
@@ -172,8 +173,6 @@ var _ = Describe("Base Flow controller", func() {
 			})
 
 			It("doesn't increase the window size if data is read so fast that the window would be consumed in less than 4 RTTs, but less than half the window has been read", func() {
-				// this test only makes sense if a window update is triggered before half of the window has been consumed
-				Expect(protocol.WindowUpdateThreshold).To(BeNumerically(">", 1/3))
 				bytesRead := controller.bytesRead
 				rtt := scaleDuration(20 * time.Millisecond)
 				setRtt(rtt)
@@ -182,7 +181,7 @@ var _ = Describe("Base Flow controller", func() {
 				// ... in 4*2/3 of the RTT
 				controller.epochStartOffset = controller.bytesRead
 				controller.epochStartTime = time.Now().Add(-rtt * 4 * 1 / 3)
-				controller.AddBytesRead(dataRead)
+				controller.addBytesRead(dataRead)
 				offset := controller.getWindowUpdate()
 				Expect(offset).ToNot(BeZero())
 				// check that the window size was not increased
@@ -201,7 +200,7 @@ var _ = Describe("Base Flow controller", func() {
 				// ... in 4*2/3 of the RTT
 				controller.epochStartOffset = controller.bytesRead
 				controller.epochStartTime = time.Now().Add(-rtt * 4 * 2 / 3)
-				controller.AddBytesRead(dataRead)
+				controller.addBytesRead(dataRead)
 				offset := controller.getWindowUpdate()
 				Expect(offset).ToNot(BeZero())
 				// check that the window size was not increased
@@ -215,7 +214,7 @@ var _ = Describe("Base Flow controller", func() {
 					// make sure the next call to maybeAdjustWindowSize will increase the window
 					controller.epochStartTime = time.Now().Add(-time.Millisecond)
 					controller.epochStartOffset = controller.bytesRead
-					controller.AddBytesRead(controller.receiveWindowSize/2 + 1)
+					controller.addBytesRead(controller.receiveWindowSize/2 + 1)
 				}
 				setRtt(scaleDuration(20 * time.Millisecond))
 				resetEpoch()

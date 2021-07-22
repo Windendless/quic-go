@@ -8,6 +8,7 @@ import (
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
+	"github.com/lucas-clemente/quic-go/quicvarint"
 )
 
 // ErrInvalidReservedBits is returned when the reserved bits are incorrect.
@@ -128,6 +129,7 @@ func (h *ExtendedHeader) Write(b *bytes.Buffer, ver protocol.VersionNumber) erro
 
 func (h *ExtendedHeader) writeLongHeader(b *bytes.Buffer, _ protocol.VersionNumber) error {
 	var packetType uint8
+	//nolint:exhaustive
 	switch h.Type {
 	case protocol.PacketTypeInitial:
 		packetType = 0x0
@@ -151,16 +153,16 @@ func (h *ExtendedHeader) writeLongHeader(b *bytes.Buffer, _ protocol.VersionNumb
 	b.WriteByte(uint8(h.SrcConnectionID.Len()))
 	b.Write(h.SrcConnectionID.Bytes())
 
+	//nolint:exhaustive
 	switch h.Type {
 	case protocol.PacketTypeRetry:
 		b.Write(h.Token)
 		return nil
 	case protocol.PacketTypeInitial:
-		utils.WriteVarInt(b, uint64(len(h.Token)))
+		quicvarint.Write(b, uint64(len(h.Token)))
 		b.Write(h.Token)
 	}
-
-	utils.WriteVarInt(b, uint64(h.Length))
+	quicvarint.WriteWithLen(b, uint64(h.Length), 2)
 	return h.writePacketNumber(b)
 }
 
@@ -199,9 +201,9 @@ func (h *ExtendedHeader) ParsedLen() protocol.ByteCount {
 // GetLength determines the length of the Header.
 func (h *ExtendedHeader) GetLength(v protocol.VersionNumber) protocol.ByteCount {
 	if h.IsLongHeader {
-		length := 1 /* type byte */ + 4 /* version */ + 1 /* dest conn ID len */ + protocol.ByteCount(h.DestConnectionID.Len()) + 1 /* src conn ID len */ + protocol.ByteCount(h.SrcConnectionID.Len()) + protocol.ByteCount(h.PacketNumberLen) + utils.VarIntLen(uint64(h.Length))
+		length := 1 /* type byte */ + 4 /* version */ + 1 /* dest conn ID len */ + protocol.ByteCount(h.DestConnectionID.Len()) + 1 /* src conn ID len */ + protocol.ByteCount(h.SrcConnectionID.Len()) + protocol.ByteCount(h.PacketNumberLen) + 2 /* length */
 		if h.Type == protocol.PacketTypeInitial {
-			length += utils.VarIntLen(uint64(len(h.Token))) + protocol.ByteCount(len(h.Token))
+			length += quicvarint.Len(uint64(len(h.Token))) + protocol.ByteCount(len(h.Token))
 		}
 		return length
 	}
@@ -226,8 +228,8 @@ func (h *ExtendedHeader) Log(logger utils.Logger) {
 				return
 			}
 		}
-		logger.Debugf("\tLong Header{Type: %s, DestConnectionID: %s, SrcConnectionID: %s, %sPacketNumber: %#x, PacketNumberLen: %d, Length: %d, Version: %s}", h.Type, h.DestConnectionID, h.SrcConnectionID, token, h.PacketNumber, h.PacketNumberLen, h.Length, h.Version)
+		logger.Debugf("\tLong Header{Type: %s, DestConnectionID: %s, SrcConnectionID: %s, %sPacketNumber: %d, PacketNumberLen: %d, Length: %d, Version: %s}", h.Type, h.DestConnectionID, h.SrcConnectionID, token, h.PacketNumber, h.PacketNumberLen, h.Length, h.Version)
 	} else {
-		logger.Debugf("\tShort Header{DestConnectionID: %s, PacketNumber: %#x, PacketNumberLen: %d, KeyPhase: %s}", h.DestConnectionID, h.PacketNumber, h.PacketNumberLen, h.KeyPhase)
+		logger.Debugf("\tShort Header{DestConnectionID: %s, PacketNumber: %d, PacketNumberLen: %d, KeyPhase: %s}", h.DestConnectionID, h.PacketNumber, h.PacketNumberLen, h.KeyPhase)
 	}
 }

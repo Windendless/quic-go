@@ -15,11 +15,11 @@ import (
 var _ = Describe("Closed local session", func() {
 	var (
 		sess  packetHandler
-		mconn *MockConnection
+		mconn *MockSendConn
 	)
 
 	BeforeEach(func() {
-		mconn = NewMockConnection(mockCtrl)
+		mconn = NewMockSendConn(mockCtrl)
 		sess = newClosedLocalSession(mconn, []byte("close"), protocol.PerspectiveClient, utils.DefaultLogger)
 	})
 
@@ -49,7 +49,7 @@ var _ = Describe("Closed local session", func() {
 	})
 
 	It("destroys sessions", func() {
-		Expect(areClosedSessionsRunning()).To(BeTrue())
+		Eventually(areClosedSessionsRunning).Should(BeTrue())
 		sess.destroy(errors.New("destroy"))
 		Eventually(areClosedSessionsRunning).Should(BeFalse())
 	})

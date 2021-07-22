@@ -2,13 +2,13 @@ package quic
 
 import (
 	"bytes"
+	"math/rand"
 
 	"github.com/lucas-clemente/quic-go/internal/ackhandler"
-
-	"github.com/golang/mock/gomock"
-
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/wire"
+
+	"github.com/golang/mock/gomock"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -38,7 +38,7 @@ var _ = Describe("Framer", func() {
 
 	Context("handling control frames", func() {
 		It("adds control frames", func() {
-			mdf := &wire.MaxDataFrame{ByteOffset: 0x42}
+			mdf := &wire.MaxDataFrame{MaximumData: 0x42}
 			msf := &wire.MaxStreamsFrame{MaxStreamNum: 0x1337}
 			framer.QueueControlFrame(mdf)
 			framer.QueueControlFrame(msf)
@@ -50,9 +50,19 @@ var _ = Describe("Framer", func() {
 			Expect(length).To(Equal(mdf.Length(version) + msf.Length(version)))
 		})
 
+		It("says if it has data", func() {
+			Expect(framer.HasData()).To(BeFalse())
+			f := &wire.MaxDataFrame{MaximumData: 0x42}
+			framer.QueueControlFrame(f)
+			Expect(framer.HasData()).To(BeTrue())
+			frames, _ := framer.AppendControlFrames(nil, 1000)
+			Expect(frames).To(HaveLen(1))
+			Expect(framer.HasData()).To(BeFalse())
+		})
+
 		It("appends to the slice given", func() {
 			ping := &wire.PingFrame{}
-			mdf := &wire.MaxDataFrame{ByteOffset: 0x42}
+			mdf := &wire.MaxDataFrame{MaximumData: 0x42}
 			framer.QueueControlFrame(mdf)
 			frames, length := framer.AppendControlFrames([]ackhandler.Frame{{Frame: ping}}, 1000)
 			Expect(frames).To(HaveLen(2))
@@ -63,7 +73,7 @@ var _ = Describe("Framer", func() {
 
 		It("adds the right number of frames", func() {
 			maxSize := protocol.ByteCount(1000)
-			bf := &wire.DataBlockedFrame{DataLimit: 0x1337}
+			bf := &wire.DataBlockedFrame{MaximumData: 0x1337}
 			bfLen := bf.Length(version)
 			numFrames := int(maxSize / bfLen) // max number of frames that fit into maxSize
 			for i := 0; i < numFrames+1; i++ {
@@ -75,6 +85,26 @@ var _ = Describe("Framer", func() {
 			frames, length = framer.AppendControlFrames(nil, maxSize)
 			Expect(frames).To(HaveLen(1))
 			Expect(length).To(Equal(bfLen))
+		})
+
+		It("drops *_BLOCKED frames when 0-RTT is rejected", func() {
+			ping := &wire.PingFrame{}
+			ncid := &wire.NewConnectionIDFrame{SequenceNumber: 10, ConnectionID: protocol.ConnectionID{0xde, 0xad, 0xbe, 0xef}}
+			frames := []wire.Frame{
+				&wire.DataBlockedFrame{MaximumData: 1337},
+				&wire.StreamDataBlockedFrame{StreamID: 42, MaximumStreamData: 1337},
+				&wire.StreamsBlockedFrame{StreamLimit: 13},
+				ping,
+				ncid,
+			}
+			rand.Shuffle(len(frames), func(i, j int) { frames[i], frames[j] = frames[j], frames[i] })
+			for _, f := range frames {
+				framer.QueueControlFrame(f)
+			}
+			Expect(framer.Handle0RTTRejection()).To(Succeed())
+			fs, length := framer.AppendControlFrames(nil, protocol.MaxByteCount)
+			Expect(fs).To(HaveLen(2))
+			Expect(length).To(Equal(ping.Length(version) + ncid.Length(version)))
 		})
 	})
 
@@ -99,6 +129,25 @@ var _ = Describe("Framer", func() {
 			Expect(length).To(Equal(f.Length(version)))
 		})
 
+		It("says if it has data", func() {
+			streamGetter.EXPECT().GetOrOpenSendStream(id1).Return(stream1, nil).Times(2)
+			Expect(framer.HasData()).To(BeFalse())
+			framer.AddActiveStream(id1)
+			Expect(framer.HasData()).To(BeTrue())
+			f1 := &wire.StreamFrame{StreamID: id1, Data: []byte("foo")}
+			f2 := &wire.StreamFrame{StreamID: id1, Data: []byte("bar")}
+			stream1.EXPECT().popStreamFrame(gomock.Any()).Return(&ackhandler.Frame{Frame: f1}, true)
+			stream1.EXPECT().popStreamFrame(gomock.Any()).Return(&ackhandler.Frame{Frame: f2}, false)
+			frames, _ := framer.AppendStreamFrames(nil, protocol.MaxByteCount)
+			Expect(frames).To(HaveLen(1))
+			Expect(frames[0].Frame).To(Equal(f1))
+			Expect(framer.HasData()).To(BeTrue())
+			frames, _ = framer.AppendStreamFrames(nil, protocol.MaxByteCount)
+			Expect(frames).To(HaveLen(1))
+			Expect(frames[0].Frame).To(Equal(f2))
+			Expect(framer.HasData()).To(BeFalse())
+		})
+
 		It("appends to a frame slice", func() {
 			streamGetter.EXPECT().GetOrOpenSendStream(id1).Return(stream1, nil)
 			f := &wire.StreamFrame{
@@ -108,7 +157,7 @@ var _ = Describe("Framer", func() {
 			}
 			stream1.EXPECT().popStreamFrame(gomock.Any()).Return(&ackhandler.Frame{Frame: f}, false)
 			framer.AddActiveStream(id1)
-			mdf := &wire.MaxDataFrame{ByteOffset: 1337}
+			mdf := &wire.MaxDataFrame{MaximumData: 1337}
 			frames := []ackhandler.Frame{{Frame: mdf}}
 			fs, length := framer.AppendStreamFrames(frames, 1000)
 			Expect(fs).To(HaveLen(2))
@@ -323,6 +372,14 @@ var _ = Describe("Framer", func() {
 			Expect(fs).To(HaveLen(1))
 			Expect(fs[0].Frame).To(Equal(f))
 			Expect(length).To(Equal(f.Length(version)))
+		})
+
+		It("drops all STREAM frames when 0-RTT is rejected", func() {
+			framer.AddActiveStream(id1)
+			Expect(framer.Handle0RTTRejection()).To(Succeed())
+			fs, length := framer.AppendStreamFrames(nil, protocol.MaxByteCount)
+			Expect(fs).To(BeEmpty())
+			Expect(length).To(BeZero())
 		})
 	})
 })

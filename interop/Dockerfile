@@ -2,9 +2,9 @@ FROM martenseemann/quic-network-simulator-endpoint:latest AS builder
 
 RUN apt-get update && apt-get install -y wget tar git
 
-RUN wget https://dl.google.com/go/go1.13.3.linux-amd64.tar.gz && \
-  tar xfz go1.13.3.linux-amd64.tar.gz && \
-  rm go1.13.3.linux-amd64.tar.gz
+RUN wget https://dl.google.com/go/go1.16.linux-amd64.tar.gz && \
+  tar xfz go1.16.linux-amd64.tar.gz && \
+  rm go1.16.linux-amd64.tar.gz
 
 ENV PATH="/go/bin:${PATH}"
 
@@ -18,16 +18,16 @@ RUN git clone https://github.com/lucas-clemente/quic-go && \
 
 WORKDIR /quic-go
 
-RUN go build -o server interop/server/main.go && \
- go build -o client interop/client/main.go
+RUN git rev-parse HEAD > commit.txt
+RUN go build -o server -ldflags="-X github.com/lucas-clemente/quic-go/qlog.quicGoVersion=$(git describe --always --long --dirty)" interop/server/main.go
+RUN go build -o client -ldflags="-X github.com/lucas-clemente/quic-go/qlog.quicGoVersion=$(git describe --always --long --dirty)" interop/client/main.go
 
 
 FROM martenseemann/quic-network-simulator-endpoint:latest
 
 WORKDIR /quic-go
 
-COPY --from=builder /quic-go/internal/testdata/cert.pem /quic-go/internal/testdata/priv.key internal/testdata/
-COPY --from=builder /quic-go/server /quic-go/client ./
+COPY --from=builder /quic-go/commit.txt /quic-go/server /quic-go/client ./
 
 COPY run_endpoint.sh .
 RUN chmod +x run_endpoint.sh

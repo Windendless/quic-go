@@ -1,8 +1,10 @@
 package handshake
 
 import (
+	"fmt"
+
 	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/marten-seemann/qtls"
+	"github.com/lucas-clemente/quic-go/internal/qtls"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -12,39 +14,61 @@ var _ = Describe("TLS Extension Handler, for the server", func() {
 	var (
 		handlerServer tlsExtensionHandler
 		handlerClient tlsExtensionHandler
+		version       protocol.VersionNumber
 	)
 
 	BeforeEach(func() {
+		version = protocol.VersionDraft29
+	})
+
+	JustBeforeEach(func() {
 		handlerServer = newExtensionHandler(
 			[]byte("foobar"),
 			protocol.PerspectiveServer,
+			version,
 		)
 		handlerClient = newExtensionHandler(
 			[]byte("raboof"),
 			protocol.PerspectiveClient,
+			version,
 		)
 	})
 
 	Context("for the server", func() {
-		Context("sending", func() {
-			It("only adds TransportParameters for the Encrypted Extensions", func() {
-				// test 2 other handshake types
-				Expect(handlerServer.GetExtensions(uint8(typeCertificate))).To(BeEmpty())
-				Expect(handlerServer.GetExtensions(uint8(typeFinished))).To(BeEmpty())
-			})
+		for _, ver := range []protocol.VersionNumber{protocol.VersionDraft29, protocol.Version1} {
+			v := ver
 
-			It("adds TransportParameters to the EncryptedExtensions message", func() {
-				exts := handlerServer.GetExtensions(uint8(typeEncryptedExtensions))
-				Expect(exts).To(HaveLen(1))
-				Expect(exts[0].Type).To(BeEquivalentTo(quicTLSExtensionType))
-				Expect(exts[0].Data).To(Equal([]byte("foobar")))
+			Context(fmt.Sprintf("sending, for version %s", v), func() {
+				var extensionType uint16
+
+				BeforeEach(func() {
+					version = v
+					if v == protocol.VersionDraft29 {
+						extensionType = quicTLSExtensionTypeOldDrafts
+					} else {
+						extensionType = quicTLSExtensionType
+					}
+				})
+
+				It("only adds TransportParameters for the Encrypted Extensions", func() {
+					// test 2 other handshake types
+					Expect(handlerServer.GetExtensions(uint8(typeCertificate))).To(BeEmpty())
+					Expect(handlerServer.GetExtensions(uint8(typeFinished))).To(BeEmpty())
+				})
+
+				It("adds TransportParameters to the EncryptedExtensions message", func() {
+					exts := handlerServer.GetExtensions(uint8(typeEncryptedExtensions))
+					Expect(exts).To(HaveLen(1))
+					Expect(exts[0].Type).To(BeEquivalentTo(extensionType))
+					Expect(exts[0].Data).To(Equal([]byte("foobar")))
+				})
 			})
-		})
+		}
 
 		Context("receiving", func() {
 			var chExts []qtls.Extension
 
-			BeforeEach(func() {
+			JustBeforeEach(func() {
 				chExts = handlerClient.GetExtensions(uint8(typeClientHello))
 				Expect(chExts).To(HaveLen(1))
 			})
@@ -84,36 +108,54 @@ var _ = Describe("TLS Extension Handler, for the server", func() {
 			})
 
 			It("ignores extensions that are not sent with the ClientHello", func() {
+				done := make(chan struct{})
 				go func() {
 					defer GinkgoRecover()
 					handlerServer.ReceivedExtensions(uint8(typeFinished), chExts)
+					close(done)
 				}()
 
 				Consistently(handlerServer.TransportParameters()).ShouldNot(Receive())
+				Eventually(done).Should(BeClosed())
 			})
 		})
 	})
 
 	Context("for the client", func() {
-		Context("sending", func() {
-			It("only adds TransportParameters for the Encrypted Extensions", func() {
-				// test 2 other handshake types
-				Expect(handlerClient.GetExtensions(uint8(typeCertificate))).To(BeEmpty())
-				Expect(handlerClient.GetExtensions(uint8(typeFinished))).To(BeEmpty())
-			})
+		for _, ver := range []protocol.VersionNumber{protocol.VersionDraft29, protocol.Version1} {
+			v := ver
 
-			It("adds TransportParameters to the ClientHello message", func() {
-				exts := handlerClient.GetExtensions(uint8(typeClientHello))
-				Expect(exts).To(HaveLen(1))
-				Expect(exts[0].Type).To(BeEquivalentTo(quicTLSExtensionType))
-				Expect(exts[0].Data).To(Equal([]byte("raboof")))
+			Context(fmt.Sprintf("sending, for version %s", v), func() {
+				var extensionType uint16
+
+				BeforeEach(func() {
+					version = v
+					if v == protocol.VersionDraft29 {
+						extensionType = quicTLSExtensionTypeOldDrafts
+					} else {
+						extensionType = quicTLSExtensionType
+					}
+				})
+
+				It("only adds TransportParameters for the Encrypted Extensions", func() {
+					// test 2 other handshake types
+					Expect(handlerClient.GetExtensions(uint8(typeCertificate))).To(BeEmpty())
+					Expect(handlerClient.GetExtensions(uint8(typeFinished))).To(BeEmpty())
+				})
+
+				It("adds TransportParameters to the ClientHello message", func() {
+					exts := handlerClient.GetExtensions(uint8(typeClientHello))
+					Expect(exts).To(HaveLen(1))
+					Expect(exts[0].Type).To(BeEquivalentTo(extensionType))
+					Expect(exts[0].Data).To(Equal([]byte("raboof")))
+				})
 			})
-		})
+		}
 
 		Context("receiving", func() {
 			var chExts []qtls.Extension
 
-			BeforeEach(func() {
+			JustBeforeEach(func() {
 				chExts = handlerServer.GetExtensions(uint8(typeEncryptedExtensions))
 				Expect(chExts).To(HaveLen(1))
 			})
@@ -153,12 +195,15 @@ var _ = Describe("TLS Extension Handler, for the server", func() {
 			})
 
 			It("ignores extensions that are not sent with the EncryptedExtensions", func() {
+				done := make(chan struct{})
 				go func() {
 					defer GinkgoRecover()
 					handlerClient.ReceivedExtensions(uint8(typeFinished), chExts)
+					close(done)
 				}()
 
 				Consistently(handlerClient.TransportParameters()).ShouldNot(Receive())
+				Eventually(done).Should(BeClosed())
 			})
 		})
 	})

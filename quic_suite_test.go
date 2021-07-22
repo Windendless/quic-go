@@ -1,13 +1,14 @@
 package quic
 
 import (
+	"io/ioutil"
+	"log"
 	"sync"
+	"testing"
 
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-
-	"testing"
 )
 
 func TestQuicGo(t *testing.T) {
@@ -22,6 +23,10 @@ var _ = BeforeEach(func() {
 
 	// reset the sync.Once
 	connMuxerOnce = *new(sync.Once)
+})
+
+var _ = BeforeSuite(func() {
+	log.SetOutput(ioutil.Discard)
 })
 
 var _ = AfterEach(func() {

@@ -18,7 +18,7 @@ var _ = Describe("Frame parsing", func() {
 
 	BeforeEach(func() {
 		buf = &bytes.Buffer{}
-		parser = NewFrameParser(versionIETFFrames)
+		parser = NewFrameParser(true, versionIETFFrames)
 	})
 
 	It("returns nil if there's nothing more to read", func() {
@@ -82,9 +82,9 @@ var _ = Describe("Frame parsing", func() {
 
 	It("unpacks RESET_STREAM frames", func() {
 		f := &ResetStreamFrame{
-			StreamID:   0xdeadbeef,
-			ByteOffset: 0xdecafbad1234,
-			ErrorCode:  0x1337,
+			StreamID:  0xdeadbeef,
+			FinalSize: 0xdecafbad1234,
+			ErrorCode: 0x1337,
 		}
 		err := f.Write(buf, versionIETFFrames)
 		Expect(err).ToNot(HaveOccurred())
@@ -130,7 +130,7 @@ var _ = Describe("Frame parsing", func() {
 		f := &StreamFrame{
 			StreamID: 0x42,
 			Offset:   0x1337,
-			FinBit:   true,
+			Fin:      true,
 			Data:     []byte("foobar"),
 		}
 		err := f.Write(buf, versionIETFFrames)
@@ -143,7 +143,7 @@ var _ = Describe("Frame parsing", func() {
 
 	It("unpacks MAX_DATA frames", func() {
 		f := &MaxDataFrame{
-			ByteOffset: 0xcafe,
+			MaximumData: 0xcafe,
 		}
 		buf := &bytes.Buffer{}
 		err := f.Write(buf, versionIETFFrames)
@@ -155,8 +155,8 @@ var _ = Describe("Frame parsing", func() {
 
 	It("unpacks MAX_STREAM_DATA frames", func() {
 		f := &MaxStreamDataFrame{
-			StreamID:   0xdeadbeef,
-			ByteOffset: 0xdecafbad,
+			StreamID:          0xdeadbeef,
+			MaximumStreamData: 0xdecafbad,
 		}
 		buf := &bytes.Buffer{}
 		err := f.Write(buf, versionIETFFrames)
@@ -180,7 +180,7 @@ var _ = Describe("Frame parsing", func() {
 	})
 
 	It("unpacks DATA_BLOCKED frames", func() {
-		f := &DataBlockedFrame{DataLimit: 0x1234}
+		f := &DataBlockedFrame{MaximumData: 0x1234}
 		buf := &bytes.Buffer{}
 		err := f.Write(buf, versionIETFFrames)
 		Expect(err).ToNot(HaveOccurred())
@@ -191,8 +191,8 @@ var _ = Describe("Frame parsing", func() {
 
 	It("unpacks STREAM_DATA_BLOCKED frames", func() {
 		f := &StreamDataBlockedFrame{
-			StreamID:  0xdeadbeef,
-			DataLimit: 0xdead,
+			StreamID:          0xdeadbeef,
+			MaximumStreamData: 0xdead,
 		}
 		err := f.Write(buf, versionIETFFrames)
 		Expect(err).ToNot(HaveOccurred())
@@ -218,7 +218,7 @@ var _ = Describe("Frame parsing", func() {
 		f := &NewConnectionIDFrame{
 			SequenceNumber:      0x1337,
 			ConnectionID:        protocol.ConnectionID{0xde, 0xad, 0xbe, 0xef},
-			StatelessResetToken: [16]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+			StatelessResetToken: protocol.StatelessResetToken{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
 		}
 		buf := &bytes.Buffer{}
 		Expect(f.Write(buf, versionIETFFrames)).To(Succeed())
@@ -280,21 +280,47 @@ var _ = Describe("Frame parsing", func() {
 		Expect(frame).To(Equal(f))
 	})
 
+	It("unpacks DATAGRAM frames", func() {
+		f := &DatagramFrame{Data: []byte("foobar")}
+		buf := &bytes.Buffer{}
+		Expect(f.Write(buf, versionIETFFrames)).To(Succeed())
+		frame, err := parser.ParseNext(bytes.NewReader(buf.Bytes()), protocol.Encryption1RTT)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(frame).To(Equal(f))
+	})
+
+	It("errors when DATAGRAM frames are not supported", func() {
+		parser = NewFrameParser(false, versionIETFFrames)
+		f := &DatagramFrame{Data: []byte("foobar")}
+		buf := &bytes.Buffer{}
+		Expect(f.Write(buf, versionIETFFrames)).To(Succeed())
+		_, err := parser.ParseNext(bytes.NewReader(buf.Bytes()), protocol.Encryption1RTT)
+		Expect(err).To(MatchError(&qerr.TransportError{
+			ErrorCode:    qerr.FrameEncodingError,
+			FrameType:    0x30,
+			ErrorMessage: "unknown frame type",
+		}))
+	})
+
 	It("errors on invalid type", func() {
 		_, err := parser.ParseNext(bytes.NewReader([]byte{0x42}), protocol.Encryption1RTT)
-		Expect(err).To(MatchError("FRAME_ENCODING_ERROR (frame type: 0x42): unknown frame type"))
+		Expect(err).To(MatchError(&qerr.TransportError{
+			ErrorCode:    qerr.FrameEncodingError,
+			FrameType:    0x42,
+			ErrorMessage: "unknown frame type",
+		}))
 	})
 
 	It("errors on invalid frames", func() {
 		f := &MaxStreamDataFrame{
-			StreamID:   0x1337,
-			ByteOffset: 0xdeadbeef,
+			StreamID:          0x1337,
+			MaximumStreamData: 0xdeadbeef,
 		}
 		b := &bytes.Buffer{}
 		f.Write(b, versionIETFFrames)
 		_, err := parser.ParseNext(bytes.NewReader(b.Bytes()[:b.Len()-2]), protocol.Encryption1RTT)
 		Expect(err).To(HaveOccurred())
-		Expect(err.(*qerr.QuicError).ErrorCode).To(Equal(qerr.FrameEncodingError))
+		Expect(err.(*qerr.TransportError).ErrorCode).To(Equal(qerr.FrameEncodingError))
 	})
 
 	Context("encryption level check", func() {
@@ -318,6 +344,7 @@ var _ = Describe("Frame parsing", func() {
 			&PathResponseFrame{},
 			&ConnectionCloseFrame{},
 			&HandshakeDoneFrame{},
+			&DatagramFrame{},
 		}
 
 		var framesSerialized [][]byte
@@ -338,8 +365,9 @@ var _ = Describe("Frame parsing", func() {
 				case *AckFrame, *ConnectionCloseFrame, *CryptoFrame, *PingFrame:
 					Expect(err).ToNot(HaveOccurred())
 				default:
-					Expect(err).To(HaveOccurred())
-					Expect(err.Error()).To(ContainSubstring("not allowed at encryption level Initial"))
+					Expect(err).To(BeAssignableToTypeOf(&qerr.TransportError{}))
+					Expect(err.(*qerr.TransportError).ErrorCode).To(Equal(qerr.FrameEncodingError))
+					Expect(err.(*qerr.TransportError).ErrorMessage).To(ContainSubstring("not allowed at encryption level Initial"))
 				}
 			}
 		})
@@ -351,8 +379,9 @@ var _ = Describe("Frame parsing", func() {
 				case *AckFrame, *ConnectionCloseFrame, *CryptoFrame, *PingFrame:
 					Expect(err).ToNot(HaveOccurred())
 				default:
-					Expect(err).To(HaveOccurred())
-					Expect(err.Error()).To(ContainSubstring("not allowed at encryption level Handshake"))
+					Expect(err).To(BeAssignableToTypeOf(&qerr.TransportError{}))
+					Expect(err.(*qerr.TransportError).ErrorCode).To(Equal(qerr.FrameEncodingError))
+					Expect(err.(*qerr.TransportError).ErrorMessage).To(ContainSubstring("not allowed at encryption level Handshake"))
 				}
 			}
 		})
@@ -362,8 +391,9 @@ var _ = Describe("Frame parsing", func() {
 				_, err := parser.ParseNext(bytes.NewReader(b), protocol.Encryption0RTT)
 				switch frames[i].(type) {
 				case *AckFrame, *ConnectionCloseFrame, *CryptoFrame, *NewTokenFrame, *PathResponseFrame, *RetireConnectionIDFrame:
-					Expect(err).To(HaveOccurred())
-					Expect(err.Error()).To(ContainSubstring("not allowed at encryption level 0-RTT"))
+					Expect(err).To(BeAssignableToTypeOf(&qerr.TransportError{}))
+					Expect(err.(*qerr.TransportError).ErrorCode).To(Equal(qerr.FrameEncodingError))
+					Expect(err.(*qerr.TransportError).ErrorMessage).To(ContainSubstring("not allowed at encryption level 0-RTT"))
 				default:
 					Expect(err).ToNot(HaveOccurred())
 				}

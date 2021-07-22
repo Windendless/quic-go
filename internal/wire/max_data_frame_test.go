@@ -4,7 +4,8 @@ import (
 	"bytes"
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/utils"
+	"github.com/lucas-clemente/quic-go/quicvarint"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -17,7 +18,7 @@ var _ = Describe("MAX_DATA frame", func() {
 			b := bytes.NewReader(data)
 			frame, err := parseMaxDataFrame(b, versionIETFFrames)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(frame.ByteOffset).To(Equal(protocol.ByteCount(0xdecafbad123456)))
+			Expect(frame.MaximumData).To(Equal(protocol.ByteCount(0xdecafbad123456)))
 			Expect(b.Len()).To(BeZero())
 		})
 
@@ -36,15 +37,15 @@ var _ = Describe("MAX_DATA frame", func() {
 	Context("writing", func() {
 		It("has proper min length", func() {
 			f := &MaxDataFrame{
-				ByteOffset: 0xdeadbeef,
+				MaximumData: 0xdeadbeef,
 			}
-			Expect(f.Length(versionIETFFrames)).To(Equal(1 + utils.VarIntLen(0xdeadbeef)))
+			Expect(f.Length(versionIETFFrames)).To(Equal(1 + quicvarint.Len(0xdeadbeef)))
 		})
 
 		It("writes a MAX_DATA frame", func() {
 			b := &bytes.Buffer{}
 			f := &MaxDataFrame{
-				ByteOffset: 0xdeadbeefcafe,
+				MaximumData: 0xdeadbeefcafe,
 			}
 			err := f.Write(b, versionIETFFrames)
 			Expect(err).ToNot(HaveOccurred())

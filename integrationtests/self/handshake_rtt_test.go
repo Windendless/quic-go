@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	quic "github.com/lucas-clemente/quic-go"
+	"github.com/lucas-clemente/quic-go"
 	quicproxy "github.com/lucas-clemente/quic-go/integrationtests/tools/proxy"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 
@@ -29,7 +29,7 @@ var _ = Describe("Handshake RTT tests", func() {
 
 	BeforeEach(func() {
 		acceptStopped = make(chan struct{})
-		serverConfig = &quic.Config{}
+		serverConfig = getQuicConfig(nil)
 		serverTLSConfig = getTLSConfig()
 	})
 
@@ -79,16 +79,13 @@ var _ = Describe("Handshake RTT tests", func() {
 		}
 		serverConfig.Versions = protocol.SupportedVersions[:1]
 		runServerAndProxy()
-		clientConfig := &quic.Config{
-			Versions: protocol.SupportedVersions[1:2],
-		}
+		clientConfig := getQuicConfig(&quic.Config{Versions: protocol.SupportedVersions[1:2]})
 		_, err := quic.DialAddr(
 			proxy.LocalAddr().String(),
 			getTLSClientConfig(),
 			clientConfig,
 		)
 		Expect(err).To(HaveOccurred())
-		// Expect(err.(qerr.ErrorCode)).To(Equal(qerr.InvalidVersion))
 		expectDurationInRTTs(1)
 	})
 
@@ -96,7 +93,7 @@ var _ = Describe("Handshake RTT tests", func() {
 
 	BeforeEach(func() {
 		serverConfig.Versions = []protocol.VersionNumber{protocol.VersionTLS}
-		clientConfig = &quic.Config{Versions: []protocol.VersionNumber{protocol.VersionTLS}}
+		clientConfig = getQuicConfig(&quic.Config{Versions: []protocol.VersionNumber{protocol.VersionTLS}})
 		clientConfig := getTLSClientConfig()
 		clientConfig.InsecureSkipVerify = true
 	})
@@ -147,7 +144,7 @@ var _ = Describe("Handshake RTT tests", func() {
 		serverConfig.AcceptToken = func(_ net.Addr, _ *quic.Token) bool {
 			return false
 		}
-		clientConfig.HandshakeTimeout = 500 * time.Millisecond
+		clientConfig.HandshakeIdleTimeout = 500 * time.Millisecond
 		runServerAndProxy()
 		_, err := quic.DialAddr(
 			fmt.Sprintf("localhost:%d", proxy.LocalAddr().(*net.UDPAddr).Port),
@@ -155,6 +152,8 @@ var _ = Describe("Handshake RTT tests", func() {
 			clientConfig,
 		)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("Handshake did not complete in time"))
+		nerr, ok := err.(net.Error)
+		Expect(ok).To(BeTrue())
+		Expect(nerr.Timeout()).To(BeTrue())
 	})
 })

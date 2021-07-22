@@ -5,7 +5,7 @@ import (
 	"io"
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/utils"
+	"github.com/lucas-clemente/quic-go/quicvarint"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -19,7 +19,7 @@ var _ = Describe("DATA_BLOCKED frame", func() {
 			b := bytes.NewReader(data)
 			frame, err := parseDataBlockedFrame(b, versionIETFFrames)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(frame.DataLimit).To(Equal(protocol.ByteCount(0x12345678)))
+			Expect(frame.MaximumData).To(Equal(protocol.ByteCount(0x12345678)))
 			Expect(b.Len()).To(BeZero())
 		})
 
@@ -38,7 +38,7 @@ var _ = Describe("DATA_BLOCKED frame", func() {
 	Context("when writing", func() {
 		It("writes a sample frame", func() {
 			b := &bytes.Buffer{}
-			frame := DataBlockedFrame{DataLimit: 0xdeadbeef}
+			frame := DataBlockedFrame{MaximumData: 0xdeadbeef}
 			err := frame.Write(b, protocol.VersionWhatever)
 			Expect(err).ToNot(HaveOccurred())
 			expected := []byte{0x14}
@@ -47,8 +47,8 @@ var _ = Describe("DATA_BLOCKED frame", func() {
 		})
 
 		It("has the correct min length", func() {
-			frame := DataBlockedFrame{DataLimit: 0x12345}
-			Expect(frame.Length(versionIETFFrames)).To(Equal(1 + utils.VarIntLen(0x12345)))
+			frame := DataBlockedFrame{MaximumData: 0x12345}
+			Expect(frame.Length(versionIETFFrames)).To(Equal(1 + quicvarint.Len(0x12345)))
 		})
 	})
 })

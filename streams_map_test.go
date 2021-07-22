@@ -7,8 +7,8 @@ import (
 	"net"
 
 	"github.com/golang/mock/gomock"
+
 	"github.com/lucas-clemente/quic-go/internal/flowcontrol"
-	"github.com/lucas-clemente/quic-go/internal/handshake"
 	"github.com/lucas-clemente/quic-go/internal/mocks"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/qerr"
@@ -81,7 +81,7 @@ var _ = Describe("Streams Map", func() {
 			)
 
 			allowUnlimitedStreams := func() {
-				m.UpdateLimits(&handshake.TransportParameters{
+				m.UpdateLimits(&wire.TransportParameters{
 					MaxBidiStreamNum: protocol.MaxStreamCount,
 					MaxUniStreamNum:  protocol.MaxStreamCount,
 				})
@@ -212,22 +212,22 @@ var _ = Describe("Streams Map", func() {
 
 				It("errors when deleting unknown incoming unidirectional streams", func() {
 					id := ids.firstIncomingUniStream + 4
-					Expect(m.DeleteStream(id)).To(MatchError(fmt.Sprintf("Tried to delete unknown incoming stream %d", id)))
+					Expect(m.DeleteStream(id)).To(MatchError(fmt.Sprintf("tried to delete unknown incoming stream %d", id)))
 				})
 
 				It("errors when deleting unknown outgoing unidirectional streams", func() {
 					id := ids.firstOutgoingUniStream + 4
-					Expect(m.DeleteStream(id)).To(MatchError(fmt.Sprintf("Tried to delete unknown outgoing stream %d", id)))
+					Expect(m.DeleteStream(id)).To(MatchError(fmt.Sprintf("tried to delete unknown outgoing stream %d", id)))
 				})
 
 				It("errors when deleting unknown incoming bidirectional streams", func() {
 					id := ids.firstIncomingBidiStream + 4
-					Expect(m.DeleteStream(id)).To(MatchError(fmt.Sprintf("Tried to delete unknown incoming stream %d", id)))
+					Expect(m.DeleteStream(id)).To(MatchError(fmt.Sprintf("tried to delete unknown incoming stream %d", id)))
 				})
 
 				It("errors when deleting unknown outgoing bidirectional streams", func() {
 					id := ids.firstOutgoingBidiStream + 4
-					Expect(m.DeleteStream(id)).To(MatchError(fmt.Sprintf("Tried to delete unknown outgoing stream %d", id)))
+					Expect(m.DeleteStream(id)).To(MatchError(fmt.Sprintf("tried to delete unknown outgoing stream %d", id)))
 				})
 			})
 
@@ -250,7 +250,10 @@ var _ = Describe("Streams Map", func() {
 					It("errors when the peer tries to open a higher outgoing bidirectional stream", func() {
 						id := ids.firstOutgoingBidiStream + 5*4
 						_, err := m.GetOrOpenSendStream(id)
-						Expect(err).To(MatchError(fmt.Sprintf("STREAM_STATE_ERROR: peer attempted to open stream %d", id)))
+						Expect(err).To(MatchError(&qerr.TransportError{
+							ErrorCode:    qerr.StreamStateError,
+							ErrorMessage: fmt.Sprintf("peer attempted to open stream %d", id),
+						}))
 					})
 
 					It("gets an outgoing unidirectional stream", func() {
@@ -266,7 +269,10 @@ var _ = Describe("Streams Map", func() {
 					It("errors when the peer tries to open a higher outgoing bidirectional stream", func() {
 						id := ids.firstOutgoingUniStream + 5*4
 						_, err := m.GetOrOpenSendStream(id)
-						Expect(err).To(MatchError(fmt.Sprintf("STREAM_STATE_ERROR: peer attempted to open stream %d", id)))
+						Expect(err).To(MatchError(&qerr.TransportError{
+							ErrorCode:    qerr.StreamStateError,
+							ErrorMessage: fmt.Sprintf("peer attempted to open stream %d", id),
+						}))
 					})
 
 					It("gets an incoming bidirectional stream", func() {
@@ -279,7 +285,10 @@ var _ = Describe("Streams Map", func() {
 					It("errors when trying to get an incoming unidirectional stream", func() {
 						id := ids.firstIncomingUniStream
 						_, err := m.GetOrOpenSendStream(id)
-						Expect(err).To(MatchError(fmt.Sprintf("STREAM_STATE_ERROR: peer attempted to open send stream %d", id)))
+						Expect(err).To(MatchError(&qerr.TransportError{
+							ErrorCode:    qerr.StreamStateError,
+							ErrorMessage: fmt.Sprintf("peer attempted to open send stream %d", id),
+						}))
 					})
 				})
 
@@ -297,7 +306,10 @@ var _ = Describe("Streams Map", func() {
 					It("errors when the peer tries to open a higher outgoing bidirectional stream", func() {
 						id := ids.firstOutgoingBidiStream + 5*4
 						_, err := m.GetOrOpenReceiveStream(id)
-						Expect(err).To(MatchError(fmt.Sprintf("STREAM_STATE_ERROR: peer attempted to open stream %d", id)))
+						Expect(err).To(MatchError(&qerr.TransportError{
+							ErrorCode:    qerr.StreamStateError,
+							ErrorMessage: fmt.Sprintf("peer attempted to open stream %d", id),
+						}))
 					})
 
 					It("gets an incoming bidirectional stream", func() {
@@ -317,57 +329,73 @@ var _ = Describe("Streams Map", func() {
 					It("errors when trying to get an outgoing unidirectional stream", func() {
 						id := ids.firstOutgoingUniStream
 						_, err := m.GetOrOpenReceiveStream(id)
-						Expect(err).To(MatchError(fmt.Sprintf("STREAM_STATE_ERROR: peer attempted to open receive stream %d", id)))
+						Expect(err).To(MatchError(&qerr.TransportError{
+							ErrorCode:    qerr.StreamStateError,
+							ErrorMessage: fmt.Sprintf("peer attempted to open receive stream %d", id),
+						}))
 					})
 				})
 			})
 
-			Context("updating stream ID limits", func() {
-				for _, p := range []protocol.Perspective{protocol.PerspectiveClient, protocol.PerspectiveServer} {
-					pers := p
+			It("processes the parameter for outgoing streams", func() {
+				mockSender.EXPECT().queueControlFrame(gomock.Any())
+				_, err := m.OpenStream()
+				expectTooManyStreamsError(err)
+				m.UpdateLimits(&wire.TransportParameters{
+					MaxBidiStreamNum: 5,
+					MaxUniStreamNum:  8,
+				})
 
-					It(fmt.Sprintf("processes the parameter for outgoing streams, as a %s", pers), func() {
-						mockSender.EXPECT().queueControlFrame(gomock.Any())
-						m.perspective = pers
-						_, err := m.OpenStream()
-						expectTooManyStreamsError(err)
-						Expect(m.UpdateLimits(&handshake.TransportParameters{
-							MaxBidiStreamNum: 5,
-							MaxUniStreamNum:  8,
-						})).To(Succeed())
-
-						mockSender.EXPECT().queueControlFrame(gomock.Any()).Times(2)
-						// test we can only 5 bidirectional streams
-						for i := 0; i < 5; i++ {
-							str, err := m.OpenStream()
-							Expect(err).ToNot(HaveOccurred())
-							Expect(str.StreamID()).To(Equal(ids.firstOutgoingBidiStream + protocol.StreamID(4*i)))
-						}
-						_, err = m.OpenStream()
-						expectTooManyStreamsError(err)
-						// test we can only 8 unidirectional streams
-						for i := 0; i < 8; i++ {
-							str, err := m.OpenUniStream()
-							Expect(err).ToNot(HaveOccurred())
-							Expect(str.StreamID()).To(Equal(ids.firstOutgoingUniStream + protocol.StreamID(4*i)))
-						}
-						_, err = m.OpenUniStream()
-						expectTooManyStreamsError(err)
-					})
+				mockSender.EXPECT().queueControlFrame(gomock.Any()).Times(2)
+				// test we can only 5 bidirectional streams
+				for i := 0; i < 5; i++ {
+					str, err := m.OpenStream()
+					Expect(err).ToNot(HaveOccurred())
+					Expect(str.StreamID()).To(Equal(ids.firstOutgoingBidiStream + protocol.StreamID(4*i)))
 				}
-
-				It("rejects parameters with too large unidirectional stream counts", func() {
-					Expect(m.UpdateLimits(&handshake.TransportParameters{
-						MaxUniStreamNum: protocol.MaxStreamCount + 1,
-					})).To(MatchError(qerr.StreamLimitError))
-				})
-
-				It("rejects parameters with too large unidirectional stream counts", func() {
-					Expect(m.UpdateLimits(&handshake.TransportParameters{
-						MaxBidiStreamNum: protocol.MaxStreamCount + 1,
-					})).To(MatchError(qerr.StreamLimitError))
-				})
+				_, err = m.OpenStream()
+				expectTooManyStreamsError(err)
+				// test we can only 8 unidirectional streams
+				for i := 0; i < 8; i++ {
+					str, err := m.OpenUniStream()
+					Expect(err).ToNot(HaveOccurred())
+					Expect(str.StreamID()).To(Equal(ids.firstOutgoingUniStream + protocol.StreamID(4*i)))
+				}
+				_, err = m.OpenUniStream()
+				expectTooManyStreamsError(err)
 			})
+
+			if perspective == protocol.PerspectiveClient {
+				It("applies parameters to existing streams (needed for 0-RTT)", func() {
+					m.UpdateLimits(&wire.TransportParameters{
+						MaxBidiStreamNum: 1000,
+						MaxUniStreamNum:  1000,
+					})
+					flowControllers := make(map[protocol.StreamID]*mocks.MockStreamFlowController)
+					m.newFlowController = func(id protocol.StreamID) flowcontrol.StreamFlowController {
+						fc := mocks.NewMockStreamFlowController(mockCtrl)
+						flowControllers[id] = fc
+						return fc
+					}
+
+					str, err := m.OpenStream()
+					Expect(err).ToNot(HaveOccurred())
+					unistr, err := m.OpenUniStream()
+					Expect(err).ToNot(HaveOccurred())
+
+					Expect(flowControllers).To(HaveKey(str.StreamID()))
+					flowControllers[str.StreamID()].EXPECT().UpdateSendWindow(protocol.ByteCount(4321))
+					Expect(flowControllers).To(HaveKey(unistr.StreamID()))
+					flowControllers[unistr.StreamID()].EXPECT().UpdateSendWindow(protocol.ByteCount(1234))
+
+					m.UpdateLimits(&wire.TransportParameters{
+						MaxBidiStreamNum:               1000,
+						InitialMaxStreamDataUni:        1234,
+						MaxUniStreamNum:                1000,
+						InitialMaxStreamDataBidiRemote: 4321,
+					})
+				})
+			}
 
 			Context("handling MAX_STREAMS frames", func() {
 				BeforeEach(func() {
@@ -377,10 +405,10 @@ var _ = Describe("Streams Map", func() {
 				It("processes IDs for outgoing bidirectional streams", func() {
 					_, err := m.OpenStream()
 					expectTooManyStreamsError(err)
-					Expect(m.HandleMaxStreamsFrame(&wire.MaxStreamsFrame{
+					m.HandleMaxStreamsFrame(&wire.MaxStreamsFrame{
 						Type:         protocol.StreamTypeBidi,
 						MaxStreamNum: 1,
-					})).To(Succeed())
+					})
 					str, err := m.OpenStream()
 					Expect(err).ToNot(HaveOccurred())
 					Expect(str.StreamID()).To(Equal(ids.firstOutgoingBidiStream))
@@ -391,10 +419,10 @@ var _ = Describe("Streams Map", func() {
 				It("processes IDs for outgoing unidirectional streams", func() {
 					_, err := m.OpenUniStream()
 					expectTooManyStreamsError(err)
-					Expect(m.HandleMaxStreamsFrame(&wire.MaxStreamsFrame{
+					m.HandleMaxStreamsFrame(&wire.MaxStreamsFrame{
 						Type:         protocol.StreamTypeUni,
 						MaxStreamNum: 1,
-					})).To(Succeed())
+					})
 					str, err := m.OpenUniStream()
 					Expect(err).ToNot(HaveOccurred())
 					Expect(str.StreamID()).To(Equal(ids.firstOutgoingUniStream))
@@ -445,6 +473,28 @@ var _ = Describe("Streams Map", func() {
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(Equal(testErr.Error()))
 			})
+
+			if perspective == protocol.PerspectiveClient {
+				It("resets for 0-RTT", func() {
+					mockSender.EXPECT().queueControlFrame(gomock.Any()).AnyTimes()
+					m.ResetFor0RTT()
+					// make sure that calls to open / accept streams fail
+					_, err := m.OpenStream()
+					Expect(err).To(MatchError(Err0RTTRejected))
+					_, err = m.AcceptStream(context.Background())
+					Expect(err).To(MatchError(Err0RTTRejected))
+					// make sure that we can still get new streams, as the server might be sending us data
+					str, err := m.GetOrOpenReceiveStream(3)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(str).ToNot(BeNil())
+
+					// now switch to using the new streams map
+					m.UseResetMaps()
+					_, err = m.OpenStream()
+					Expect(err).To(HaveOccurred())
+					Expect(err.Error()).To(ContainSubstring("too many open streams"))
+				})
+			}
 		})
 	}
 })

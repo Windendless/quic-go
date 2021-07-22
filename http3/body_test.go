@@ -155,13 +155,6 @@ var _ = Describe("Body", func() {
 				Expect(errorCbCalled).To(BeTrue())
 			})
 
-			if bodyType == bodyTypeRequest {
-				It("closes requests", func() {
-					str.EXPECT().Close()
-					Expect(rb.Close()).To(Succeed())
-				})
-			}
-
 			if bodyType == bodyTypeResponse {
 				It("closes the reqDone channel when Read errors", func() {
 					buf.Write([]byte("invalid"))
@@ -180,12 +173,12 @@ var _ = Describe("Body", func() {
 				})
 
 				It("closes responses", func() {
-					str.EXPECT().CancelRead(quic.ErrorCode(errorRequestCanceled))
+					str.EXPECT().CancelRead(quic.StreamErrorCode(errorRequestCanceled))
 					Expect(rb.Close()).To(Succeed())
 				})
 
 				It("allows multiple calls to Close", func() {
-					str.EXPECT().CancelRead(quic.ErrorCode(errorRequestCanceled)).MaxTimes(2)
+					str.EXPECT().CancelRead(quic.StreamErrorCode(errorRequestCanceled)).MaxTimes(2)
 					Expect(rb.Close()).To(Succeed())
 					Expect(reqDone).To(BeClosed())
 					Expect(rb.Close()).To(Succeed())

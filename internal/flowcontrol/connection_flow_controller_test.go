@@ -3,7 +3,6 @@ package flowcontrol
 import (
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/congestion"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	. "github.com/onsi/ginkgo"
@@ -25,13 +24,13 @@ var _ = Describe("Connection Flow controller", func() {
 	BeforeEach(func() {
 		queuedWindowUpdate = false
 		controller = &connectionFlowController{}
-		controller.rttStats = &congestion.RTTStats{}
+		controller.rttStats = &utils.RTTStats{}
 		controller.logger = utils.DefaultLogger
 		controller.queueWindowUpdate = func() { queuedWindowUpdate = true }
 	})
 
 	Context("Constructor", func() {
-		rttStats := &congestion.RTTStats{}
+		rttStats := &utils.RTTStats{}
 
 		It("sets the send and receive windows", func() {
 			receiveWindow := protocol.ByteCount(2000)
@@ -128,6 +127,30 @@ var _ = Describe("Connection Flow controller", func() {
 		It("starts a new epoch after the window size was increased", func() {
 			controller.EnsureMinimumWindowSize(1912)
 			Expect(controller.epochStartTime).To(BeTemporally("~", time.Now(), 100*time.Millisecond))
+		})
+	})
+
+	Context("resetting", func() {
+		It("resets", func() {
+			const initialWindow protocol.ByteCount = 1337
+			controller.UpdateSendWindow(initialWindow)
+			controller.AddBytesSent(1000)
+			Expect(controller.SendWindowSize()).To(Equal(initialWindow - 1000))
+			Expect(controller.Reset()).To(Succeed())
+			Expect(controller.SendWindowSize()).To(Equal(initialWindow))
+		})
+
+		It("says if is blocked after resetting", func() {
+			const initialWindow protocol.ByteCount = 1337
+			controller.UpdateSendWindow(initialWindow)
+			controller.AddBytesSent(initialWindow)
+			blocked, _ := controller.IsNewlyBlocked()
+			Expect(blocked).To(BeTrue())
+			Expect(controller.Reset()).To(Succeed())
+			controller.AddBytesSent(initialWindow)
+			blocked, blockedAt := controller.IsNewlyBlocked()
+			Expect(blocked).To(BeTrue())
+			Expect(blockedAt).To(Equal(initialWindow))
 		})
 	})
 })

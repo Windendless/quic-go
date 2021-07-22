@@ -1,10 +1,12 @@
 package self_test
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -13,7 +15,7 @@ import (
 	"strconv"
 	"time"
 
-	quic "github.com/lucas-clemente/quic-go"
+	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/testdata"
@@ -22,11 +24,6 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
 )
-
-type streamCancelError interface {
-	Canceled() bool
-	ErrorCode() protocol.ApplicationErrorCode
-}
 
 var _ = Describe("HTTP tests", func() {
 	var (
@@ -76,7 +73,7 @@ var _ = Describe("HTTP tests", func() {
 				Handler:   mux,
 				TLSConfig: testdata.GetTLSConfig(),
 			},
-			QuicConfig: &quic.Config{Versions: versions},
+			QuicConfig: getQuicConfig(&quic.Config{Versions: versions}),
 		}
 
 		addr, err := net.ResolveUDPAddr("udp", "0.0.0.0:0")
@@ -110,10 +107,10 @@ var _ = Describe("HTTP tests", func() {
 							RootCAs: testdata.GetRootCA(),
 						},
 						DisableCompression: true,
-						QuicConfig: &quic.Config{
+						QuicConfig: getQuicConfig(&quic.Config{
 							Versions:       []protocol.VersionNumber{version},
 							MaxIdleTimeout: 10 * time.Second,
-						},
+						}),
 					},
 				}
 			})
@@ -259,10 +256,9 @@ var _ = Describe("HTTP tests", func() {
 					for {
 						if _, err := w.Write([]byte("foobar")); err != nil {
 							Expect(r.Context().Done()).To(BeClosed())
-							serr, ok := err.(streamCancelError)
-							Expect(ok).To(BeTrue())
-							Expect(serr.Canceled()).To(BeTrue())
-							Expect(serr.ErrorCode()).To(BeEquivalentTo(0x10c))
+							var strErr *quic.StreamError
+							Expect(errors.As(err, &strErr)).To(BeTrue())
+							Expect(strErr.ErrorCode).To(Equal(quic.StreamErrorCode(0x10c)))
 							return
 						}
 					}
@@ -279,6 +275,44 @@ var _ = Describe("HTTP tests", func() {
 				Eventually(handlerCalled).Should(BeClosed())
 				_, err = resp.Body.Read([]byte{0})
 				Expect(err).To(HaveOccurred())
+			})
+
+			It("allows streamed HTTP requests", func() {
+				done := make(chan struct{})
+				mux.HandleFunc("/echoline", func(w http.ResponseWriter, r *http.Request) {
+					defer GinkgoRecover()
+					defer close(done)
+					w.WriteHeader(200)
+					w.(http.Flusher).Flush()
+					reader := bufio.NewReader(r.Body)
+					for {
+						msg, err := reader.ReadString('\n')
+						if err != nil {
+							return
+						}
+						_, err = w.Write([]byte(msg))
+						Expect(err).ToNot(HaveOccurred())
+						w.(http.Flusher).Flush()
+					}
+				})
+
+				r, w := io.Pipe()
+				req, err := http.NewRequest("PUT", "https://localhost:"+port+"/echoline", r)
+				Expect(err).ToNot(HaveOccurred())
+				rsp, err := client.Do(req)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(rsp.StatusCode).To(Equal(200))
+
+				reader := bufio.NewReader(rsp.Body)
+				for i := 0; i < 5; i++ {
+					msg := fmt.Sprintf("Hello world, %d!\n", i)
+					fmt.Fprint(w, msg)
+					msgRcvd, err := reader.ReadString('\n')
+					Expect(err).ToNot(HaveOccurred())
+					Expect(msgRcvd).To(Equal(msg))
+				}
+				Expect(req.Body.Close()).To(Succeed())
+				Eventually(done).Should(BeClosed())
 			})
 		})
 	}

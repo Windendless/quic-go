@@ -10,11 +10,17 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
+	"golang.org/x/sync/errgroup"
+
+	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/http3"
+	"github.com/lucas-clemente/quic-go/internal/handshake"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/interop/http09"
-	"golang.org/x/sync/errgroup"
+	"github.com/lucas-clemente/quic-go/interop/utils"
+	"github.com/lucas-clemente/quic-go/qlog"
 )
 
 var errUnsupported = errors.New("unsupported test case")
@@ -30,12 +36,14 @@ func main() {
 	defer logFile.Close()
 	log.SetOutput(logFile)
 
-	keyLog, err := os.Create("/logs/keylogfile.txt")
+	keyLog, err := utils.GetSSLKeyLog()
 	if err != nil {
-		fmt.Printf("Could not create key log file: %s\n", err.Error())
+		fmt.Printf("Could not create key log: %s\n", err.Error())
 		os.Exit(1)
 	}
-	defer keyLog.Close()
+	if keyLog != nil {
+		defer keyLog.Close()
+	}
 
 	tlsConf = &tls.Config{
 		InsecureSkipVerify: true,
@@ -56,33 +64,54 @@ func runTestcase(testcase string) error {
 	flag.Parse()
 	urls := flag.Args()
 
-	switch testcase {
-	case "http3":
-		r := &http3.RoundTripper{TLSClientConfig: tlsConf}
+	getLogWriter, err := utils.GetQLOGWriter()
+	if err != nil {
+		return err
+	}
+	quicConf := &quic.Config{Tracer: qlog.NewTracer(getLogWriter)}
+
+	if testcase == "http3" {
+		r := &http3.RoundTripper{
+			TLSClientConfig: tlsConf,
+			QuicConfig:      quicConf,
+		}
 		defer r.Close()
-		return downloadFiles(r, urls)
+		return downloadFiles(r, urls, false)
+	}
+
+	r := &http09.RoundTripper{
+		TLSClientConfig: tlsConf,
+		QuicConfig:      quicConf,
+	}
+	defer r.Close()
+
+	switch testcase {
 	case "handshake", "transfer", "retry":
+	case "keyupdate":
+		handshake.KeyUpdateInterval = 100
+	case "chacha20":
+		tlsConf.CipherSuites = []uint16{tls.TLS_CHACHA20_POLY1305_SHA256}
 	case "multiconnect":
-		return runMultiConnectTest(urls)
+		return runMultiConnectTest(r, urls)
 	case "versionnegotiation":
-		return runVersionNegotiationTest(urls)
+		return runVersionNegotiationTest(r, urls)
 	case "resumption":
-		return runResumptionTest(urls)
+		return runResumptionTest(r, urls, false)
+	case "zerortt":
+		return runResumptionTest(r, urls, true)
 	default:
 		return errUnsupported
 	}
 
-	r := &http09.RoundTripper{TLSClientConfig: tlsConf}
-	defer r.Close()
-	return downloadFiles(r, urls)
+	return downloadFiles(r, urls, false)
 }
 
-func runVersionNegotiationTest(urls []string) error {
+func runVersionNegotiationTest(r *http09.RoundTripper, urls []string) error {
 	if len(urls) != 1 {
 		return errors.New("expected at least 2 URLs")
 	}
 	protocol.SupportedVersions = []protocol.VersionNumber{0x1a2a3a4a}
-	err := downloadFile(&http09.RoundTripper{}, urls[0])
+	err := downloadFile(r, urls[0], false)
 	if err == nil {
 		return errors.New("expected version negotiation to fail")
 	}
@@ -92,10 +121,9 @@ func runVersionNegotiationTest(urls []string) error {
 	return nil
 }
 
-func runMultiConnectTest(urls []string) error {
+func runMultiConnectTest(r *http09.RoundTripper, urls []string) error {
 	for _, url := range urls {
-		r := &http09.RoundTripper{TLSClientConfig: tlsConf}
-		if err := downloadFile(r, url); err != nil {
+		if err := downloadFile(r, url, false); err != nil {
 			return err
 		}
 		if err := r.Close(); err != nil {
@@ -105,39 +133,67 @@ func runMultiConnectTest(urls []string) error {
 	return nil
 }
 
-func runResumptionTest(urls []string) error {
+type sessionCache struct {
+	tls.ClientSessionCache
+	put chan<- struct{}
+}
+
+func newSessionCache(c tls.ClientSessionCache) (tls.ClientSessionCache, <-chan struct{}) {
+	put := make(chan struct{}, 100)
+	return &sessionCache{ClientSessionCache: c, put: put}, put
+}
+
+func (c *sessionCache) Put(key string, cs *tls.ClientSessionState) {
+	c.ClientSessionCache.Put(key, cs)
+	c.put <- struct{}{}
+}
+
+func runResumptionTest(r *http09.RoundTripper, urls []string, use0RTT bool) error {
 	if len(urls) < 2 {
 		return errors.New("expected at least 2 URLs")
 	}
 
-	tlsConf.ClientSessionCache = tls.NewLRUClientSessionCache(1)
+	var put <-chan struct{}
+	tlsConf.ClientSessionCache, put = newSessionCache(tls.NewLRUClientSessionCache(1))
 
 	// do the first transfer
-	r := &http09.RoundTripper{TLSClientConfig: tlsConf}
-	if err := downloadFiles(r, urls[:1]); err != nil {
+	if err := downloadFiles(r, urls[:1], false); err != nil {
 		return err
 	}
-	r.Close()
+
+	// wait for the session ticket to arrive
+	select {
+	case <-time.NewTimer(10 * time.Second).C:
+		return errors.New("expected to receive a session ticket within 10 seconds")
+	case <-put:
+	}
+
+	if err := r.Close(); err != nil {
+		return err
+	}
 
 	// reestablish the connection, using the session ticket that the server (hopefully provided)
-	r = &http09.RoundTripper{TLSClientConfig: tlsConf}
 	defer r.Close()
-	return downloadFiles(r, urls[1:])
+	return downloadFiles(r, urls[1:], use0RTT)
 }
 
-func downloadFiles(cl http.RoundTripper, urls []string) error {
+func downloadFiles(cl http.RoundTripper, urls []string, use0RTT bool) error {
 	var g errgroup.Group
 	for _, u := range urls {
 		url := u
 		g.Go(func() error {
-			return downloadFile(cl, url)
+			return downloadFile(cl, url, use0RTT)
 		})
 	}
 	return g.Wait()
 }
 
-func downloadFile(cl http.RoundTripper, url string) error {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func downloadFile(cl http.RoundTripper, url string, use0RTT bool) error {
+	method := http.MethodGet
+	if use0RTT {
+		method = http09.MethodGet0RTT
+	}
+	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
 		return err
 	}

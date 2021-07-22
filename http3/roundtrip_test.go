@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	quic "github.com/lucas-clemente/quic-go"
+	"github.com/lucas-clemente/quic-go"
 	mockquic "github.com/lucas-clemente/quic-go/internal/mocks/quic"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -23,6 +23,7 @@ type mockClient struct {
 func (m *mockClient) RoundTrip(req *http.Request) (*http.Response, error) {
 	return &http.Response{Request: req}, nil
 }
+
 func (m *mockClient) Close() error {
 	m.closed = true
 	return nil
@@ -100,7 +101,11 @@ var _ = Describe("RoundTripper", func() {
 			session.EXPECT().OpenUniStream().AnyTimes().Return(nil, testErr)
 			session.EXPECT().HandshakeComplete().Return(handshakeCtx)
 			session.EXPECT().OpenStreamSync(context.Background()).Return(nil, testErr)
-			session.EXPECT().CloseWithError(gomock.Any(), gomock.Any()).Do(func(quic.ErrorCode, string) { close(closed) })
+			session.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
+				<-closed
+				return nil, errors.New("test done")
+			}).MaxTimes(1)
+			session.EXPECT().CloseWithError(gomock.Any(), gomock.Any()).Do(func(quic.ApplicationErrorCode, string) { close(closed) })
 			_, err = rt.RoundTrip(req)
 			Expect(err).To(MatchError(testErr))
 			Expect(rt.clients).To(HaveLen(1))
@@ -108,7 +113,7 @@ var _ = Describe("RoundTripper", func() {
 		})
 
 		It("uses the quic.Config, if provided", func() {
-			config := &quic.Config{HandshakeTimeout: time.Millisecond}
+			config := &quic.Config{HandshakeIdleTimeout: time.Millisecond}
 			var receivedConfig *quic.Config
 			dialAddr = func(addr string, tlsConf *tls.Config, config *quic.Config) (quic.EarlySession, error) {
 				receivedConfig = config
@@ -117,7 +122,7 @@ var _ = Describe("RoundTripper", func() {
 			rt.QuicConfig = config
 			_, err := rt.RoundTrip(req1)
 			Expect(err).To(MatchError("handshake error"))
-			Expect(receivedConfig.HandshakeTimeout).To(Equal(config.HandshakeTimeout))
+			Expect(receivedConfig.HandshakeIdleTimeout).To(Equal(config.HandshakeIdleTimeout))
 		})
 
 		It("uses the custom dialer, if provided", func() {
@@ -138,7 +143,11 @@ var _ = Describe("RoundTripper", func() {
 			session.EXPECT().OpenUniStream().AnyTimes().Return(nil, testErr)
 			session.EXPECT().HandshakeComplete().Return(handshakeCtx).Times(2)
 			session.EXPECT().OpenStreamSync(context.Background()).Return(nil, testErr).Times(2)
-			session.EXPECT().CloseWithError(gomock.Any(), gomock.Any()).Do(func(quic.ErrorCode, string) { close(closed) })
+			session.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
+				<-closed
+				return nil, errors.New("test done")
+			}).MaxTimes(1)
+			session.EXPECT().CloseWithError(gomock.Any(), gomock.Any()).Do(func(quic.ApplicationErrorCode, string) { close(closed) })
 			req, err := http.NewRequest("GET", "https://quic.clemente.io/file1.html", nil)
 			Expect(err).ToNot(HaveOccurred())
 			_, err = rt.RoundTrip(req)
@@ -168,6 +177,15 @@ var _ = Describe("RoundTripper", func() {
 			_, err = rt.RoundTrip(req)
 			Expect(err).To(MatchError("http3: unsupported protocol scheme: http"))
 			Expect(req.Body.(*mockBody).closed).To(BeTrue())
+		})
+
+		It("allow non-https schemes if SkipSchemeCheck is set", func() {
+			req, err := http.NewRequest("GET", "masque://www.example.org/", nil)
+			Expect(err).ToNot(HaveOccurred())
+			_, err = rt.RoundTrip(req)
+			Expect(err).To(MatchError("http3: unsupported protocol scheme: masque"))
+			_, err = rt.RoundTripOpt(req, RoundTripOpt{SkipSchemeCheck: true, OnlyCachedConn: true})
+			Expect(err).To(MatchError("http3: no cached connection was available"))
 		})
 
 		It("rejects requests without a URL", func() {
