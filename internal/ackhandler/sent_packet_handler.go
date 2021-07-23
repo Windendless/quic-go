@@ -112,7 +112,7 @@ func newSentPacketHandler(
 	pers protocol.Perspective,
 	tracer logging.ConnectionTracer,
 	logger utils.Logger,
-) SentPacketHandler {
+) sentPacketHandler {
 	handler := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
 		peerAddressValidated:           pers == protocol.PerspectiveClient,
