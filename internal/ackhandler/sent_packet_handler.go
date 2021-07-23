@@ -138,6 +138,7 @@ func newSentPacketHandler(
 		//log.Printf("quic-go: bbr is enabled.")
 		cc = congestion.NewBBRSender(congestion.DefaultClock{},
 			rttStats,
+			initialMaxDatagramSize,
 			func() protocol.ByteCount {
 				return handler.bytesInFlight
 			},
@@ -606,6 +607,7 @@ func (h *sentPacketHandler) detectLostPackets(now time.Time, encLevel protocol.E
 	_, hasCongestionEvent := h.congestion.(congestion.CongestionEvent)
 
 	priorInFlight := h.bytesInFlight
+	var lostPackets []*Packet
 	err := pnSpace.history.Iterate(func(p *Packet) (bool, error) {
 		if p.PacketNumber > pnSpace.largestAcked {
 			return false, nil
@@ -623,6 +625,7 @@ func (h *sentPacketHandler) detectLostPackets(now time.Time, encLevel protocol.E
 			if h.tracer != nil {
 				h.tracer.LostPacket(p.EncryptionLevel, p.PacketNumber, logging.PacketLossTimeThreshold)
 			}
+			lostPackets = append(lostPackets, p)
 		} else if pnSpace.largestAcked >= p.PacketNumber+packetThreshold {
 			packetLost = true
 			if h.logger.Debug() {
@@ -631,6 +634,7 @@ func (h *sentPacketHandler) detectLostPackets(now time.Time, encLevel protocol.E
 			if h.tracer != nil {
 				h.tracer.LostPacket(p.EncryptionLevel, p.PacketNumber, logging.PacketLossReorderingThreshold)
 			}
+			lostPackets = append(lostPackets, p)
 		} else if pnSpace.lossTime.IsZero() {
 			// Note: This conditional is only entered once per call
 			lossTime := p.SendTime.Add(lossDelay)

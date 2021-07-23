@@ -3,6 +3,8 @@ package congestion
 // src from https://quiche.googlesource.com/quiche.git/+/66dea072431f94095dfc3dd2743cb94ef365f7ef/quic/core/congestion_control/bbr_sender.cc
 
 import (
+	"fmt"
+	"github.com/lucas-clemente/quic-go/internal/utils"
 	"time"
 
 	"math"
@@ -30,7 +32,7 @@ var (
 	// Constants based on TCP defaults.
 	// The minimum CWND to ensure delayed acks don't reduce bandwidth measurements.
 	// Does not inflate the pacing rate.
-	DefaultMinimumCongestionWindow = 4 * maxDatagramSize
+	//DefaultMinimumCongestionWindow = 4 * maxDatagramSize
 
 	// The gain used for the STARTUP, equal to 2/ln(2).
 	DefaultHighGain = 2.885
@@ -104,7 +106,7 @@ const (
 type bbrSender struct {
 	mode     bbrMode
 	clock    Clock
-	rttStats *RTTStats
+	rttStats *utils.RTTStats
 	// return total bytes of unacked packets.
 	GetBytesInFlight func() protocol.ByteCount
 	// Bandwidth sampler provides BBR with the bandwidth measurements at
@@ -135,9 +137,9 @@ type bbrSender struct {
 	// The initial value of the |congestion_window_|.
 	initialCongestionWindow protocol.ByteCount
 	// The largest value the |congestion_window_| can achieve.
-	maxCongestionWindow protocol.ByteCount
+	//maxCongestionWindow protocol.ByteCount
 	// The smallest value the |congestion_window_| can achieve.
-	minCongestionWindow protocol.ByteCount
+	//minCongestionWindow protocol.ByteCount
 	// The pacing gain applied during the STARTUP phase.
 	highGain float64
 	// The CWND gain applied during the STARTUP phase.
@@ -226,14 +228,25 @@ type bbrSender struct {
 	minRttSinceLastProbeRtt      time.Duration
 	// Latched value of --quic_always_get_bw_sample_when_acked.
 	alwaysGetBwSampleWhenAcked bool
+	maxDatagramSize            protocol.ByteCount
 }
 
 // NewBBRSender makes a new bbr sender
-func NewBBRSender(clock Clock, rttStats *RTTStats, getBytesInFlight func() protocol.ByteCount) *bbrSender {
-	return newBBRSender(clock, rttStats, initialCongestionWindow, maxCongestionWindow, getBytesInFlight)
+func NewBBRSender(
+	clock Clock,
+	rttStats *utils.RTTStats,
+	initialMaxDatagramSize protocol.ByteCount,
+	getBytesInFlight func() protocol.ByteCount) *bbrSender {
+	return newBBRSender(clock, rttStats, initialMaxDatagramSize, initialCongestionWindow, protocol.MaxCongestionWindowPackets*initialMaxDatagramSize, getBytesInFlight)
 }
 
-func newBBRSender(clock Clock, rttStats *RTTStats, initialCongestionWindow, maxCongestionWindow protocol.ByteCount, getBytesInFlight func() protocol.ByteCount) *bbrSender {
+func newBBRSender(
+	clock Clock,
+	rttStats *utils.RTTStats,
+	initialMaxDatagramSize,
+	initialCongestionWindow,
+	initialMaxCongestionWindow protocol.ByteCount,
+	getBytesInFlight func() protocol.ByteCount) *bbrSender {
 	return &bbrSender{
 		rttStats:                  rttStats,
 		GetBytesInFlight:          getBytesInFlight,
@@ -244,8 +257,6 @@ func newBBRSender(clock Clock, rttStats *RTTStats, initialCongestionWindow, maxC
 		maxAckHeight:              NewWindowedFilter(int64(BandwidthWindowSize), MaxFilter),
 		congestionWindow:          initialCongestionWindow,
 		initialCongestionWindow:   initialCongestionWindow,
-		maxCongestionWindow:       maxCongestionWindow,
-		minCongestionWindow:       DefaultMinimumCongestionWindow,
 		highGain:                  DefaultHighGain,
 		highCwndGain:              DefaultHighGain,
 		drainGain:                 1.0 / DefaultHighGain,
@@ -254,13 +265,37 @@ func newBBRSender(clock Clock, rttStats *RTTStats, initialCongestionWindow, maxC
 		congestionWindowGainConst: DefaultCongestionWindowGainConst,
 		numStartupRtts:            RoundTripsWithoutGrowthBeforeExitingStartup,
 		recoveryState:             NOT_IN_RECOVERY,
-		recoveryWindow:            maxCongestionWindow,
+		recoveryWindow:            initialMaxCongestionWindow,
 		minRttSinceLastProbeRtt:   InfiniteRTT,
+		maxDatagramSize:           initialMaxDatagramSize,
 	}
 }
 
-func (b *bbrSender) TimeUntilSend(bytesInFlight protocol.ByteCount) time.Duration {
-	return time.Microsecond
+func (b *bbrSender) TimeUntilSend(bytesInFlight protocol.ByteCount) time.Time {
+	return time.Time{}.Add(time.Millisecond)
+}
+
+func (b *bbrSender) HasPacingBudget() bool {
+	return false
+}
+
+func (b *bbrSender) SetMaxDatagramSize(s protocol.ByteCount) {
+	if s < b.maxDatagramSize {
+		panic(fmt.Sprintf("congestion BUG: decreased max datagram size from %d to %d", b.maxDatagramSize, s))
+	}
+	cwndIsMinCwnd := b.congestionWindow == b.minCongestionWindow()
+	b.maxDatagramSize = s
+	if cwndIsMinCwnd {
+		b.congestionWindow = b.minCongestionWindow()
+	}
+}
+
+func (b *bbrSender) maxCongestionWindow() protocol.ByteCount {
+	return b.maxDatagramSize * protocol.MaxCongestionWindowPackets
+}
+
+func (b *bbrSender) minCongestionWindow() protocol.ByteCount {
+	return b.maxDatagramSize * 4
 }
 
 func (b *bbrSender) OnPacketSent(sentTime time.Time, bytesInFlight protocol.ByteCount, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool) {
@@ -622,7 +657,7 @@ func (b *bbrSender) GetTargetCongestionWindow(gain float64) protocol.ByteCount {
 		congestionWindow = protocol.ByteCount(gain * float64(b.initialCongestionWindow))
 	}
 
-	return maxByteCount(congestionWindow, b.minCongestionWindow)
+	return maxByteCount(congestionWindow, b.minCongestionWindow())
 }
 
 func (b *bbrSender) CheckIfFullBandwidthReached() {
@@ -718,7 +753,7 @@ func (b *bbrSender) ProbeRttCongestionWindow() protocol.ByteCount {
 	if b.probeRttBasedOnBdp {
 		return b.GetTargetCongestionWindow(ModerateProbeRttMultiplier)
 	} else {
-		return b.minCongestionWindow
+		return b.minCongestionWindow()
 	}
 }
 
@@ -803,8 +838,8 @@ func (b *bbrSender) CalculateCongestionWindow(ackedBytes, excessAcked protocol.B
 	}
 
 	// Enforce the limits on the congestion window.
-	b.congestionWindow = maxByteCount(b.congestionWindow, b.minCongestionWindow)
-	b.congestionWindow = minByteCount(b.congestionWindow, b.maxCongestionWindow)
+	b.congestionWindow = maxByteCount(b.congestionWindow, b.minCongestionWindow())
+	b.congestionWindow = minByteCount(b.congestionWindow, b.maxCongestionWindow())
 }
 
 func (b *bbrSender) CalculateRecoveryWindow(ackedBytes, lostBytes protocol.ByteCount) {
@@ -818,7 +853,7 @@ func (b *bbrSender) CalculateRecoveryWindow(ackedBytes, lostBytes protocol.ByteC
 
 	// Set up the initial recovery window.
 	if b.recoveryWindow == 0 {
-		b.recoveryWindow = maxByteCount(b.GetBytesInFlight()+ackedBytes, b.minCongestionWindow)
+		b.recoveryWindow = maxByteCount(b.GetBytesInFlight()+ackedBytes, b.minCongestionWindow())
 		return
 	}
 
@@ -837,7 +872,7 @@ func (b *bbrSender) CalculateRecoveryWindow(ackedBytes, lostBytes protocol.ByteC
 	// Sanity checks.  Ensure that we always allow to send at least an MSS or
 	// |bytes_acked| in response, whichever is larger.
 	b.recoveryWindow = maxByteCount(b.recoveryWindow, b.GetBytesInFlight()+ackedBytes)
-	b.recoveryWindow = maxByteCount(b.recoveryWindow, b.minCongestionWindow)
+	b.recoveryWindow = maxByteCount(b.recoveryWindow, b.minCongestionWindow())
 }
 
 func (b *bbrSender) GetMinRtt() time.Duration {
