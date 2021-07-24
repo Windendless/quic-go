@@ -104,7 +104,19 @@ type closeError struct {
 	immediate bool
 }
 
-var errCloseForRecreating = errors.New("closing session in order to recreate it")
+type errCloseForRecreating struct {
+	nextPacketNumber protocol.PacketNumber
+	nextVersion      protocol.VersionNumber
+}
+
+func (errCloseForRecreating) Error() string {
+	return "closing session in order to recreate it"
+}
+
+func (errCloseForRecreating) Is(target error) bool {
+	_, ok := target.(errCloseForRecreating)
+	return ok
+}
 
 // A Session is a QUIC session
 type session struct {
@@ -169,6 +181,7 @@ type session struct {
 	handshakeConfirmed    bool
 
 	receivedRetry       bool
+	versionNegotiated   bool
 	receivedFirstPacket bool
 
 	idleTimeout         time.Duration
@@ -336,6 +349,7 @@ var newClientSession = func(
 	initialPacketNumber protocol.PacketNumber,
 	initialVersion protocol.VersionNumber,
 	enable0RTT bool,
+	hasNegotiatedVersion bool,
 	qlogger qlog.Tracer,
 	logger utils.Logger,
 	v protocol.VersionNumber,
@@ -352,6 +366,7 @@ var newClientSession = func(
 		logger:                logger,
 		qlogger:               qlogger,
 		initialVersion:        initialVersion,
+		versionNegotiated:     hasNegotiatedVersion,
 		version:               v,
 	}
 	s.connIDManager = newConnIDManager(
@@ -570,10 +585,6 @@ runLoop:
 			}
 		}
 
-		var pacingDeadline time.Time
-		if s.pacingDeadline.IsZero() { // the timer didn't have a pacing deadline set
-			pacingDeadline = s.sentPacketHandler.TimeUntilSend()
-		}
 		if keepAliveTime := s.nextKeepAliveTime(); !keepAliveTime.IsZero() && !now.Before(keepAliveTime) {
 			// send a PING frame since there is no activity in the session
 			s.logger.Debugf("Sending a keep-alive PING to keep the connection alive.")
@@ -591,12 +602,6 @@ runLoop:
 			}
 			s.destroyImpl(qerr.NewTimeoutError("No recent network activity"))
 			continue
-		} else if !pacingDeadline.IsZero() && now.Before(pacingDeadline) {
-			// If we get to this point before the pacing deadline, we should wait until that deadline.
-			// This can happen when scheduleSending is called, or a packet is received.
-			// Set the timer and restart the run loop.
-			s.pacingDeadline = pacingDeadline
-			continue
 		}
 
 		if err := s.sendPackets(); err != nil {
@@ -605,7 +610,7 @@ runLoop:
 	}
 
 	s.handleCloseError(closeErr)
-	if closeErr.err != errCloseForRecreating && s.qlogger != nil {
+	if !errors.Is(closeErr.err, errCloseForRecreating{}) && s.qlogger != nil {
 		if err := s.qlogger.Export(); err != nil {
 			s.logger.Errorf("exporting qlog failed: %s", err)
 		}
@@ -702,6 +707,11 @@ func (s *session) handleHandshakeComplete() {
 }
 
 func (s *session) handlePacketImpl(rp *receivedPacket) bool {
+	if wire.IsVersionNegotiationPacket(rp.data) {
+		s.handleVersionNegotiationPacket(rp)
+		return false
+	}
+
 	var counter uint8
 	var lastConnID protocol.ConnectionID
 	var processed bool
@@ -896,6 +906,55 @@ func (s *session) handleRetryPacket(hdr *wire.Header, data []byte) bool /* was t
 	s.connIDManager.ChangeInitialConnID(newDestConnID)
 	s.scheduleSending()
 	return true
+}
+
+func (s *session) handleVersionNegotiationPacket(p *receivedPacket) {
+	if s.perspective == protocol.PerspectiveServer || // servers never receive version negotiation packets
+		s.receivedFirstPacket || s.versionNegotiated { // ignore delayed / duplicated version negotiation packets
+		if s.qlogger != nil {
+			s.qlogger.DroppedPacket(qlog.PacketTypeVersionNegotiation, protocol.ByteCount(len(p.data)), qlog.PacketDropUnexpectedPacket)
+		}
+		return
+	}
+
+	hdr, _, _, err := wire.ParsePacket(p.data, 0)
+	if err != nil {
+		if s.qlogger != nil {
+			s.qlogger.DroppedPacket(qlog.PacketTypeVersionNegotiation, protocol.ByteCount(len(p.data)), qlog.PacketDropHeaderParseError)
+		}
+		s.logger.Debugf("Error parsing Version Negotiation packet: %s", err)
+		return
+	}
+
+	for _, v := range hdr.SupportedVersions {
+		if v == s.version {
+			if s.qlogger != nil {
+				s.qlogger.DroppedPacket(qlog.PacketTypeVersionNegotiation, protocol.ByteCount(len(p.data)), qlog.PacketDropUnexpectedVersion)
+			}
+			// The Version Negotiation packet contains the version that we offered.
+			// This might be a packet sent by an attacker, or it was corrupted.
+			return
+		}
+	}
+
+	s.logger.Infof("Received a Version Negotiation packet. Supported Versions: %s", hdr.SupportedVersions)
+	if s.qlogger != nil {
+		s.qlogger.ReceivedVersionNegotiationPacket(hdr)
+	}
+	newVersion, ok := protocol.ChooseSupportedVersion(s.config.Versions, hdr.SupportedVersions)
+	if !ok {
+		//nolint:stylecheck
+		s.destroyImpl(fmt.Errorf("No compatible QUIC version found. We support %s, server offered %s.", s.config.Versions, hdr.SupportedVersions))
+		s.logger.Infof("No compatible QUIC version found.")
+		return
+	}
+
+	s.logger.Infof("Switching to QUIC version %s.", newVersion)
+	nextPN, _ := s.sentPacketHandler.PeekPacketNumber(protocol.EncryptionInitial)
+	s.destroyImpl(&errCloseForRecreating{
+		nextPacketNumber: nextPN,
+		nextVersion:      newVersion,
+	})
 }
 
 func (s *session) handleUnpackedPacket(
@@ -1200,14 +1259,6 @@ func (s *session) destroyImpl(e error) {
 	})
 }
 
-// closeForRecreating closes the session in order to recreate it immediately afterwards
-// It returns the first packet number that should be used in the new session.
-func (s *session) closeForRecreating() protocol.PacketNumber {
-	s.destroy(errCloseForRecreating)
-	nextPN, _ := s.sentPacketHandler.PeekPacketNumber(protocol.EncryptionInitial)
-	return nextPN
-}
-
 func (s *session) closeRemote(e error) {
 	s.closeOnce.Do(func() {
 		s.logger.Errorf("Peer closed session with error: %s", e)
@@ -1356,23 +1407,16 @@ func (s *session) processTransportParametersImpl(params *wire.TransportParameter
 func (s *session) sendPackets() error {
 	s.pacingDeadline = time.Time{}
 
-	sendMode := s.sentPacketHandler.SendMode()
-	if sendMode == ackhandler.SendNone { // shortcut: return immediately if there's nothing to send
-		return nil
-	}
-
-	numPackets := s.sentPacketHandler.ShouldSendNumPackets()
-	var numPacketsSent int
-sendLoop:
+	var sentPacket bool // only used in for packets sent in send mode SendAny
 	for {
-		switch sendMode {
+		switch sendMode := s.sentPacketHandler.SendMode(); sendMode {
 		case ackhandler.SendNone:
-			break sendLoop
+			return nil
 		case ackhandler.SendAck:
 			// If we already sent packets, and the send mode switches to SendAck,
-			// we've just become congestion limited.
+			// as we've just become congestion limited.
 			// There's no need to try to send an ACK at this moment.
-			if numPacketsSent > 0 {
+			if sentPacket {
 				return nil
 			}
 			// We can at most send a single ACK only packet.
@@ -1383,40 +1427,28 @@ sendLoop:
 			if err := s.sendProbePacket(protocol.EncryptionInitial); err != nil {
 				return err
 			}
-			numPacketsSent++
 		case ackhandler.SendPTOHandshake:
 			if err := s.sendProbePacket(protocol.EncryptionHandshake); err != nil {
 				return err
 			}
-			numPacketsSent++
 		case ackhandler.SendPTOAppData:
 			if err := s.sendProbePacket(protocol.Encryption1RTT); err != nil {
 				return err
 			}
-			numPacketsSent++
 		case ackhandler.SendAny:
-			sentPacket, err := s.sendPacket()
-			if err != nil {
+			if s.handshakeComplete && !s.sentPacketHandler.HasPacingBudget() {
+				s.pacingDeadline = s.sentPacketHandler.TimeUntilSend()
+				return nil
+			}
+			sent, err := s.sendPacket()
+			if err != nil || !sent {
 				return err
 			}
-			if !sentPacket {
-				break sendLoop
-			}
-			numPacketsSent++
+			sentPacket = true
 		default:
 			return fmt.Errorf("BUG: invalid send mode %d", sendMode)
 		}
-		if numPacketsSent >= numPackets {
-			break
-		}
-		sendMode = s.sentPacketHandler.SendMode()
 	}
-	// Only start the pacing timer if we sent as many packets as we were allowed.
-	// There will probably be more to send when calling sendPacket again.
-	if numPacketsSent == numPackets {
-		s.pacingDeadline = s.sentPacketHandler.TimeUntilSend()
-	}
-	return nil
 }
 
 func (s *session) maybeSendAckOnlyPacket() error {
@@ -1508,9 +1540,9 @@ func (s *session) sendPackedPacket(packet *packedPacket) {
 	if s.firstAckElicitingPacketAfterIdleSentTime.IsZero() && packet.IsAckEliciting() {
 		s.firstAckElicitingPacketAfterIdleSentTime = now
 	}
-	s.logPacket(now, packet)
 	s.sentPacketHandler.SentPacket(packet.ToAckHandlerPacket(time.Now(), s.retransmissionQueue))
 	s.connIDManager.SentPacket()
+	s.logPacket(now, packet)
 	s.sendQueue.Send(packet.buffer)
 }
 
