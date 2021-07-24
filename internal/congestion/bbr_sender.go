@@ -228,6 +228,10 @@ type bbrSender struct {
 	alwaysGetBwSampleWhenAcked bool
 }
 
+func (b *bbrSender) HasPacingBudget() bool {
+	return false
+}
+
 // NewBBRSender makes a new bbr sender
 func NewBBRSender(clock Clock, rttStats *RTTStats, getBytesInFlight func() protocol.ByteCount) *bbrSender {
 	return newBBRSender(clock, rttStats, initialCongestionWindow, maxCongestionWindow, getBytesInFlight)
@@ -259,8 +263,8 @@ func newBBRSender(clock Clock, rttStats *RTTStats, initialCongestionWindow, maxC
 	}
 }
 
-func (b *bbrSender) TimeUntilSend(bytesInFlight protocol.ByteCount) time.Duration {
-	return time.Microsecond
+func (b *bbrSender) TimeUntilSend(bytesInFlight protocol.ByteCount) time.Time {
+	return time.Time{}.Add(time.Millisecond)
 }
 
 func (b *bbrSender) OnPacketSent(sentTime time.Time, bytesInFlight protocol.ByteCount, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool) {
