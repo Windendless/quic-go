@@ -24,6 +24,8 @@ const (
 	timeThreshold = 9.0 / 8
 	// Maximum reordering in packets before packet threshold loss detection considers a packet lost.
 	packetThreshold = 3
+	// Before validating the client's address, the server won't send more than 3x bytes than it received.
+	amplificationFactor = 3
 )
 
 type packetNumberSpace struct {
@@ -53,8 +55,16 @@ type sentPacketHandler struct {
 	handshakePackets *packetNumberSpace
 	appDataPackets   *packetNumberSpace
 
+	// Do we know that the peer completed address validation yet?
+	// Always true for the server.
 	peerCompletedAddressValidation bool
-	handshakeComplete              bool
+	bytesReceived                  protocol.ByteCount
+	bytesSent                      protocol.ByteCount
+	// Have we validated the peer's address yet?
+	// Always true for the client.
+	peerAddressValidated bool
+
+	handshakeComplete bool
 
 	// lowestNotConfirmedAcked is the lowest packet number that we sent an ACK for, but haven't received confirmation, that this ACK actually arrived
 	// example: we send an ACK for packets 90-100 with packet number 20
@@ -97,6 +107,7 @@ func newSentPacketHandler(
 ) *sentPacketHandler {
 	handler := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
+		peerAddressValidated:           pers == protocol.PerspectiveClient,
 		initialPackets:                 newPacketNumberSpace(initialPacketNumber),
 		handshakePackets:               newPacketNumberSpace(0),
 		appDataPackets:                 newPacketNumberSpace(0),
@@ -115,7 +126,7 @@ func newSentPacketHandler(
 			true, // use Reno
 		)
 	} else {
-		//log.Printf("quic-go: bbr is enabled.")
+		log.Printf("quic-go: bbr is enabled.")
 		cc = congestion.NewBBRSender(congestion.DefaultClock{},
 			rttStats,
 			func() protocol.ByteCount {
@@ -182,7 +193,18 @@ func (h *sentPacketHandler) dropPackets(encLevel protocol.EncryptionLevel) {
 		h.qlogger.UpdatedPTOCount(0)
 	}
 	h.ptoCount = 0
+	h.numProbesToSend = 0
 	h.ptoMode = SendNone
+}
+
+func (h *sentPacketHandler) ReceivedBytes(n protocol.ByteCount) {
+	h.bytesReceived += n
+}
+
+func (h *sentPacketHandler) ReceivedPacket(encLevel protocol.EncryptionLevel) {
+	if h.perspective == protocol.PerspectiveServer && encLevel == protocol.EncryptionHandshake {
+		h.peerAddressValidated = true
+	}
 }
 
 func (h *sentPacketHandler) packetsInFlight() int {
@@ -197,6 +219,7 @@ func (h *sentPacketHandler) packetsInFlight() int {
 }
 
 func (h *sentPacketHandler) SentPacket(packet *Packet) {
+	h.bytesSent += packet.Length
 	// For the client, drop the Initial packet number space when the first Handshake packet is sent.
 	if h.perspective == protocol.PerspectiveClient && packet.EncryptionLevel == protocol.EncryptionHandshake && h.initialPackets != nil {
 		h.dropPackets(protocol.EncryptionInitial)
@@ -231,7 +254,7 @@ func (h *sentPacketHandler) sentPacketImpl(packet *Packet) bool /* is ack-elicit
 
 	if h.logger.Debug() && pnSpace.history.HasOutstandingPackets() {
 		for p := utils.MaxPacketNumber(0, pnSpace.largestSent+1); p < packet.PacketNumber; p++ {
-			h.logger.Debugf("Skipping packet number %#x", p)
+			h.logger.Debugf("Skipping packet number %d", p)
 		}
 	}
 
@@ -331,10 +354,13 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		congestionEventHandler.OnCongestionEvent(priorInFlight, rcvTime, ackedPacketsForEvent, lostPacketsForEvent)
 	}
 
-	if h.qlogger != nil && h.ptoCount != 0 {
-		h.qlogger.UpdatedPTOCount(0)
+	// Reset the pto_count unless the client is unsure if the server has validated the client's address.
+	if h.peerCompletedAddressValidation {
+		if h.qlogger != nil && h.ptoCount != 0 {
+			h.qlogger.UpdatedPTOCount(0)
+		}
+		h.ptoCount = 0
 	}
-	h.ptoCount = 0
 	h.numProbesToSend = 0
 
 	h.setLossDetectionTimer()
@@ -371,7 +397,7 @@ func (h *sentPacketHandler) detectAndRemoveAckedPackets(ack *wire.AckFrame, encL
 
 			if p.PacketNumber >= ackRange.Smallest { // packet i contained in ACK range
 				if p.PacketNumber > ackRange.Largest {
-					return false, fmt.Errorf("BUG: ackhandler would have acked wrong packet 0x%x, while evaluating range 0x%x -> 0x%x", p.PacketNumber, ackRange.Smallest, ackRange.Largest)
+					return false, fmt.Errorf("BUG: ackhandler would have acked wrong packet %d, while evaluating range %d -> %d", p.PacketNumber, ackRange.Smallest, ackRange.Largest)
 				}
 				ackedPackets = append(ackedPackets, p)
 			}
@@ -385,7 +411,7 @@ func (h *sentPacketHandler) detectAndRemoveAckedPackets(ack *wire.AckFrame, encL
 		for i, p := range ackedPackets {
 			pns[i] = p.PacketNumber
 		}
-		h.logger.Debugf("\tnewly acked packets (%d): %#x", len(pns), pns)
+		h.logger.Debugf("\tnewly acked packets (%d): %d", len(pns), pns)
 	}
 
 	for _, p := range ackedPackets {
@@ -539,7 +565,7 @@ func (h *sentPacketHandler) detectAndRemoveLostPackets(now time.Time, encLevel p
 			// Note: This conditional is only entered once per call
 			lossTime := packet.SendTime.Add(lossDelay)
 			if h.logger.Debug() {
-				h.logger.Debugf("\tsetting loss timer for packet %#x (%s) to %s (in %s)", packet.PacketNumber, encLevel, lossDelay, lossTime)
+				h.logger.Debugf("\tsetting loss timer for packet %d (%s) to %s (in %s)", packet.PacketNumber, encLevel, lossDelay, lossTime)
 			}
 			pnSpace.lossTime = lossTime
 		}
@@ -553,7 +579,7 @@ func (h *sentPacketHandler) detectAndRemoveLostPackets(now time.Time, encLevel p
 		for i, p := range lostPackets {
 			pns[i] = p.PacketNumber
 		}
-		h.logger.Debugf("\tlost packets (%d): %#x", len(pns), pns)
+		h.logger.Debugf("\tlost packets (%d): %d", len(pns), pns)
 	}
 
 	// has impled CongestionEvent interface.
@@ -629,6 +655,7 @@ func (h *sentPacketHandler) onVerifiedLossDetectionTimeout() error {
 				h.congestion.OnPacketLost(p.PacketNumber, p.Length, priorInFlight)
 			}
 		}
+		return nil
 	}
 
 	// PTO
@@ -686,6 +713,10 @@ func (h *sentPacketHandler) SendMode() SendMode {
 		numTrackedPackets += h.handshakePackets.history.Len()
 	}
 
+	if h.AmplificationWindow() == 0 {
+		h.logger.Debugf("Amplification window limited. Received %d bytes, already sent out %d bytes", h.bytesReceived, h.bytesSent)
+		return SendNone
+	}
 	// Don't send any packets if we're keeping track of the maximum number of packets.
 	// Note that since MaxOutstandingSentPackets is smaller than MaxTrackedSentPackets,
 	// we will stop sending out new data when reaching MaxOutstandingSentPackets,
@@ -731,6 +762,16 @@ func (h *sentPacketHandler) ShouldSendNumPackets() int {
 	return int(math.Ceil(float64(protocol.MinPacingDelay) / float64(delay)))
 }
 
+func (h *sentPacketHandler) AmplificationWindow() protocol.ByteCount {
+	if h.peerAddressValidated {
+		return protocol.MaxByteCount
+	}
+	if h.bytesSent >= amplificationFactor*h.bytesReceived {
+		return 0
+	}
+	return amplificationFactor*h.bytesReceived - h.bytesSent
+}
+
 func (h *sentPacketHandler) QueueProbePacket(encLevel protocol.EncryptionLevel) bool {
 	pnSpace := h.getPacketNumberSpace(encLevel)
 	p := pnSpace.history.FirstOutstanding()
@@ -773,9 +814,13 @@ func (h *sentPacketHandler) ResetForRetry() error {
 	h.appDataPackets = newPacketNumberSpace(h.appDataPackets.pns.Pop())
 	oldAlarm := h.alarm
 	h.alarm = time.Time{}
-	if h.qlogger != nil && !oldAlarm.IsZero() {
-		h.qlogger.LossTimerCanceled()
+	if h.qlogger != nil {
+		h.qlogger.UpdatedPTOCount(0)
+		if !oldAlarm.IsZero() {
+			h.qlogger.LossTimerCanceled()
+		}
 	}
+	h.ptoCount = 0
 	return nil
 }
 

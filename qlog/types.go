@@ -262,6 +262,8 @@ const (
 	PacketDropUnexpectedSourceConnectionID
 	// PacketDropUnexpectedVersion is used when a packet with an unexpected version is received
 	PacketDropUnexpectedVersion
+	// PacketDropDuplicate is used when a duplicate packet is received
+	PacketDropDuplicate
 )
 
 func (r PacketDropReason) String() string {
@@ -286,6 +288,8 @@ func (r PacketDropReason) String() string {
 		return "unexpected_source_connection_id"
 	case PacketDropUnexpectedVersion:
 		return "unexpected_version"
+	case PacketDropDuplicate:
+		return "duplicate"
 	default:
 		panic("unknown packet drop reason")
 	}
@@ -346,5 +350,28 @@ func (t TimerType) String() string {
 		return "pto"
 	default:
 		panic("unknown timer type")
+	}
+}
+
+// CloseReason is the reason why a session is closed
+type CloseReason uint8
+
+const (
+	// CloseReasonHandshakeTimeout is used when the session is closed due to a handshake timeout
+	// This reason is not defined in the qlog draft, but very useful for debugging.
+	CloseReasonHandshakeTimeout CloseReason = iota
+	// CloseReasonIdleTimeout is used when the session is closed due to an idle timeout
+	// This reason is not defined in the qlog draft, but very useful for debugging.
+	CloseReasonIdleTimeout
+)
+
+func (r CloseReason) String() string {
+	switch r {
+	case CloseReasonHandshakeTimeout:
+		return "handshake_timeout"
+	case CloseReasonIdleTimeout:
+		return "idle_timeout"
+	default:
+		panic("unknown close reason")
 	}
 }

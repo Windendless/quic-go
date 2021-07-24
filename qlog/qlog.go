@@ -21,9 +21,11 @@ const eventChanSize = 50
 type Tracer interface {
 	Export() error
 	StartedConnection(local, remote net.Addr, version protocol.VersionNumber, srcConnID, destConnID protocol.ConnectionID)
+	ClosedConnection(CloseReason)
 	SentTransportParameters(*wire.TransportParameters)
 	ReceivedTransportParameters(*wire.TransportParameters)
 	SentPacket(hdr *wire.ExtendedHeader, packetSize protocol.ByteCount, ack *wire.AckFrame, frames []wire.Frame)
+	ReceivedVersionNegotiationPacket(*wire.Header)
 	ReceivedRetry(*wire.Header)
 	ReceivedPacket(hdr *wire.ExtendedHeader, packetSize protocol.ByteCount, frames []wire.Frame)
 	ReceivedStatelessReset(token *[16]byte)
@@ -153,32 +155,45 @@ func (t *tracer) StartedConnection(local, remote net.Addr, version protocol.Vers
 	t.mutex.Unlock()
 }
 
+func (t *tracer) ClosedConnection(r CloseReason) {
+	t.mutex.Lock()
+	t.recordEvent(time.Now(), &eventConnectionClosed{Reason: r})
+	t.mutex.Unlock()
+}
+
 func (t *tracer) SentTransportParameters(tp *wire.TransportParameters) {
-	t.recordTransportParameters(ownerLocal, tp)
+	t.recordTransportParameters(t.perspective, tp)
 }
 
 func (t *tracer) ReceivedTransportParameters(tp *wire.TransportParameters) {
-	t.recordTransportParameters(ownerRemote, tp)
+	t.recordTransportParameters(t.perspective.Opposite(), tp)
 }
 
-func (t *tracer) recordTransportParameters(owner owner, tp *wire.TransportParameters) {
+func (t *tracer) recordTransportParameters(sentBy protocol.Perspective, tp *wire.TransportParameters) {
+	owner := ownerLocal
+	if sentBy != t.perspective {
+		owner = ownerRemote
+	}
 	t.mutex.Lock()
 	t.recordEvent(time.Now(), &eventTransportParameters{
-		Owner:                          owner,
-		OriginalConnectionID:           tp.OriginalConnectionID,
-		StatelessResetToken:            tp.StatelessResetToken,
-		DisableActiveMigration:         tp.DisableActiveMigration,
-		MaxIdleTimeout:                 tp.MaxIdleTimeout,
-		MaxUDPPayloadSize:              tp.MaxUDPPayloadSize,
-		AckDelayExponent:               tp.AckDelayExponent,
-		MaxAckDelay:                    tp.MaxAckDelay,
-		ActiveConnectionIDLimit:        tp.ActiveConnectionIDLimit,
-		InitialMaxData:                 tp.InitialMaxData,
-		InitialMaxStreamDataBidiLocal:  tp.InitialMaxStreamDataBidiLocal,
-		InitialMaxStreamDataBidiRemote: tp.InitialMaxStreamDataBidiRemote,
-		InitialMaxStreamDataUni:        tp.InitialMaxStreamDataUni,
-		InitialMaxStreamsBidi:          int64(tp.MaxBidiStreamNum),
-		InitialMaxStreamsUni:           int64(tp.MaxUniStreamNum),
+		Owner:                           owner,
+		SentBy:                          sentBy,
+		OriginalDestinationConnectionID: tp.OriginalDestinationConnectionID,
+		InitialSourceConnectionID:       tp.InitialSourceConnectionID,
+		RetrySourceConnectionID:         tp.RetrySourceConnectionID,
+		StatelessResetToken:             tp.StatelessResetToken,
+		DisableActiveMigration:          tp.DisableActiveMigration,
+		MaxIdleTimeout:                  tp.MaxIdleTimeout,
+		MaxUDPPayloadSize:               tp.MaxUDPPayloadSize,
+		AckDelayExponent:                tp.AckDelayExponent,
+		MaxAckDelay:                     tp.MaxAckDelay,
+		ActiveConnectionIDLimit:         tp.ActiveConnectionIDLimit,
+		InitialMaxData:                  tp.InitialMaxData,
+		InitialMaxStreamDataBidiLocal:   tp.InitialMaxStreamDataBidiLocal,
+		InitialMaxStreamDataBidiRemote:  tp.InitialMaxStreamDataBidiRemote,
+		InitialMaxStreamDataUni:         tp.InitialMaxStreamDataUni,
+		InitialMaxStreamsBidi:           int64(tp.MaxBidiStreamNum),
+		InitialMaxStreamsUni:            int64(tp.MaxUniStreamNum),
 	})
 	t.mutex.Unlock()
 }
@@ -226,6 +241,19 @@ func (t *tracer) ReceivedRetry(hdr *wire.Header) {
 	t.mutex.Lock()
 	t.recordEvent(time.Now(), &eventRetryReceived{
 		Header: *transformHeader(hdr),
+	})
+	t.mutex.Unlock()
+}
+
+func (t *tracer) ReceivedVersionNegotiationPacket(hdr *wire.Header) {
+	versions := make([]versionNumber, len(hdr.SupportedVersions))
+	for i, v := range hdr.SupportedVersions {
+		versions[i] = versionNumber(v)
+	}
+	t.mutex.Lock()
+	t.recordEvent(time.Now(), &eventVersionNegotiationReceived{
+		Header:            *transformHeader(hdr),
+		SupportedVersions: versions,
 	})
 	t.mutex.Unlock()
 }

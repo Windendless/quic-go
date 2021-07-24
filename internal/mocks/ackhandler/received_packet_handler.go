@@ -49,17 +49,17 @@ func (mr *MockReceivedPacketHandlerMockRecorder) DropPackets(arg0 interface{}) *
 }
 
 // GetAckFrame mocks base method
-func (m *MockReceivedPacketHandler) GetAckFrame(arg0 protocol.EncryptionLevel) *wire.AckFrame {
+func (m *MockReceivedPacketHandler) GetAckFrame(arg0 protocol.EncryptionLevel, arg1 bool) *wire.AckFrame {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetAckFrame", arg0)
+	ret := m.ctrl.Call(m, "GetAckFrame", arg0, arg1)
 	ret0, _ := ret[0].(*wire.AckFrame)
 	return ret0
 }
 
 // GetAckFrame indicates an expected call of GetAckFrame
-func (mr *MockReceivedPacketHandlerMockRecorder) GetAckFrame(arg0 interface{}) *gomock.Call {
+func (mr *MockReceivedPacketHandlerMockRecorder) GetAckFrame(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAckFrame", reflect.TypeOf((*MockReceivedPacketHandler)(nil).GetAckFrame), arg0)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAckFrame", reflect.TypeOf((*MockReceivedPacketHandler)(nil).GetAckFrame), arg0, arg1)
 }
 
 // GetAlarmTimeout mocks base method
@@ -74,6 +74,20 @@ func (m *MockReceivedPacketHandler) GetAlarmTimeout() time.Time {
 func (mr *MockReceivedPacketHandlerMockRecorder) GetAlarmTimeout() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAlarmTimeout", reflect.TypeOf((*MockReceivedPacketHandler)(nil).GetAlarmTimeout))
+}
+
+// IsPotentiallyDuplicate mocks base method
+func (m *MockReceivedPacketHandler) IsPotentiallyDuplicate(arg0 protocol.PacketNumber, arg1 protocol.EncryptionLevel) bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IsPotentiallyDuplicate", arg0, arg1)
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// IsPotentiallyDuplicate indicates an expected call of IsPotentiallyDuplicate
+func (mr *MockReceivedPacketHandlerMockRecorder) IsPotentiallyDuplicate(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsPotentiallyDuplicate", reflect.TypeOf((*MockReceivedPacketHandler)(nil).IsPotentiallyDuplicate), arg0, arg1)
 }
 
 // ReceivedPacket mocks base method
