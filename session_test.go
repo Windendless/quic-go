@@ -578,10 +578,63 @@ var _ = Describe("Session", func() {
 
 		It("drops Retry packets", func() {
 			p := getPacket(&wire.ExtendedHeader{Header: wire.Header{
-				IsLongHeader: true,
-				Type:         protocol.PacketTypeRetry,
-			}}, nil)
-			qlogger.EXPECT().DroppedPacket(qlog.PacketTypeNotDetermined, protocol.ByteCount(len(p.data)), gomock.Any())
+				IsLongHeader:     true,
+				Type:             protocol.PacketTypeRetry,
+				DestConnectionID: destConnID,
+				SrcConnectionID:  srcConnID,
+				Version:          sess.version,
+				Token:            []byte("foobar"),
+			}}, make([]byte, 16) /* Retry integrity tag */)
+			qlogger.EXPECT().DroppedPacket(qlog.PacketTypeRetry, protocol.ByteCount(len(p.data)), qlog.PacketDropUnexpectedPacket)
+			Expect(sess.handlePacketImpl(p)).To(BeFalse())
+		})
+
+		It("drops packets for which header decryption fails", func() {
+			p := getPacket(&wire.ExtendedHeader{
+				Header: wire.Header{
+					IsLongHeader: true,
+					Type:         protocol.PacketTypeHandshake,
+					Version:      sess.version,
+				},
+				PacketNumberLen: protocol.PacketNumberLen2,
+			}, nil)
+			p.data[0] ^= 0x40 // unset the QUIC bit
+			qlogger.EXPECT().DroppedPacket(qlog.PacketTypeNotDetermined, protocol.ByteCount(len(p.data)), qlog.PacketDropHeaderParseError)
+			Expect(sess.handlePacketImpl(p)).To(BeFalse())
+		})
+
+		It("drops packets for which the version is unsupported", func() {
+			p := getPacket(&wire.ExtendedHeader{
+				Header: wire.Header{
+					IsLongHeader: true,
+					Type:         protocol.PacketTypeHandshake,
+					Version:      sess.version + 1,
+				},
+				PacketNumberLen: protocol.PacketNumberLen2,
+			}, nil)
+			qlogger.EXPECT().DroppedPacket(qlog.PacketTypeNotDetermined, protocol.ByteCount(len(p.data)), qlog.PacketDropUnsupportedVersion)
+			Expect(sess.handlePacketImpl(p)).To(BeFalse())
+		})
+
+		It("drops packets with an unsupported version", func() {
+			origSupportedVersions := make([]protocol.VersionNumber, len(protocol.SupportedVersions))
+			copy(origSupportedVersions, protocol.SupportedVersions)
+			defer func() {
+				protocol.SupportedVersions = origSupportedVersions
+			}()
+
+			protocol.SupportedVersions = append(protocol.SupportedVersions, sess.version+1)
+			p := getPacket(&wire.ExtendedHeader{
+				Header: wire.Header{
+					IsLongHeader:     true,
+					Type:             protocol.PacketTypeHandshake,
+					DestConnectionID: destConnID,
+					SrcConnectionID:  srcConnID,
+					Version:          sess.version + 1,
+				},
+				PacketNumberLen: protocol.PacketNumberLen2,
+			}, nil)
+			qlogger.EXPECT().DroppedPacket(qlog.PacketTypeHandshake, protocol.ByteCount(len(p.data)), qlog.PacketDropUnexpectedVersion)
 			Expect(sess.handlePacketImpl(p)).To(BeFalse())
 		})
 
@@ -2027,18 +2080,24 @@ var _ = Describe("Client Session", func() {
 
 		It("ignores Retry packets after receiving a regular packet", func() {
 			sess.receivedFirstPacket = true
-			Expect(sess.handlePacketImpl(getPacket(retryHdr, getRetryTag(retryHdr)))).To(BeFalse())
+			p := getPacket(retryHdr, getRetryTag(retryHdr))
+			qlogger.EXPECT().DroppedPacket(qlog.PacketTypeRetry, protocol.ByteCount(len(p.data)), qlog.PacketDropUnexpectedPacket)
+			Expect(sess.handlePacketImpl(p)).To(BeFalse())
 		})
 
 		It("ignores Retry packets if the server didn't change the connection ID", func() {
 			retryHdr.SrcConnectionID = destConnID
-			Expect(sess.handlePacketImpl(getPacket(retryHdr, getRetryTag(retryHdr)))).To(BeFalse())
+			p := getPacket(retryHdr, getRetryTag(retryHdr))
+			qlogger.EXPECT().DroppedPacket(qlog.PacketTypeRetry, protocol.ByteCount(len(p.data)), qlog.PacketDropUnexpectedPacket)
+			Expect(sess.handlePacketImpl(p)).To(BeFalse())
 		})
 
 		It("ignores Retry packets with the a wrong Integrity tag", func() {
 			tag := getRetryTag(retryHdr)
 			tag[0]++
-			Expect(sess.handlePacketImpl(getPacket(retryHdr, tag))).To(BeFalse())
+			p := getPacket(retryHdr, tag)
+			qlogger.EXPECT().DroppedPacket(qlog.PacketTypeRetry, protocol.ByteCount(len(p.data)), qlog.PacketDropPayloadDecryptError)
+			Expect(sess.handlePacketImpl(p)).To(BeFalse())
 		})
 	})
 

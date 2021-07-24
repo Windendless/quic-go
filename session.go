@@ -585,15 +585,6 @@ runLoop:
 			continue
 		}
 
-		if !s.handshakeComplete && now.Sub(s.sessionCreationTime) >= s.config.HandshakeTimeout {
-			s.destroyImpl(qerr.NewTimeoutError("Handshake did not complete in time"))
-			continue
-		}
-		if s.handshakeComplete && now.Sub(s.idleTimeoutStartTime()) >= s.idleTimeout {
-			s.destroyImpl(qerr.NewTimeoutError("No recent network activity"))
-			continue
-		}
-
 		if err := s.sendPackets(); err != nil {
 			s.closeLocal(err)
 		}
@@ -710,9 +701,21 @@ func (s *session) handlePacketImpl(rp *receivedPacket) bool {
 		hdr, packetData, rest, err := wire.ParsePacket(p.data, s.srcConnIDLen)
 		if err != nil {
 			if s.qlogger != nil {
-				s.qlogger.DroppedPacket(qlog.PacketTypeNotDetermined, protocol.ByteCount(len(data)), qlog.PacketDropHeaderParseError)
+				dropReason := qlog.PacketDropHeaderParseError
+				if err == wire.ErrUnsupportedVersion {
+					dropReason = qlog.PacketDropUnsupportedVersion
+				}
+				s.qlogger.DroppedPacket(qlog.PacketTypeNotDetermined, protocol.ByteCount(len(data)), dropReason)
 			}
 			s.logger.Debugf("error parsing packet: %s", err)
+			break
+		}
+
+		if hdr.IsLongHeader && hdr.Version != s.version {
+			if s.qlogger != nil {
+				s.qlogger.DroppedPacket(qlog.PacketTypeFromHeader(hdr), protocol.ByteCount(len(data)), qlog.PacketDropUnexpectedVersion)
+			}
+			s.logger.Debugf("Dropping packet with version %x. Expected %x.", hdr.Version, s.version)
 			break
 		}
 
@@ -812,23 +815,27 @@ func (s *session) handleSinglePacket(p *receivedPacket, hdr *wire.Header) bool /
 }
 
 func (s *session) handleRetryPacket(hdr *wire.Header, data []byte) bool /* was this a valid Retry */ {
+	(&wire.ExtendedHeader{Header: *hdr}).Log(s.logger)
 	if s.perspective == protocol.PerspectiveServer {
+		if s.qlogger != nil {
+			s.qlogger.DroppedPacket(qlog.PacketTypeRetry, protocol.ByteCount(len(data)), qlog.PacketDropUnexpectedPacket)
+		}
 		s.logger.Debugf("Ignoring Retry.")
 		return false
 	}
 	if s.receivedFirstPacket {
+		if s.qlogger != nil {
+			s.qlogger.DroppedPacket(qlog.PacketTypeRetry, protocol.ByteCount(len(data)), qlog.PacketDropUnexpectedPacket)
+		}
 		s.logger.Debugf("Ignoring Retry, since we already received a packet.")
 		return false
 	}
-	(&wire.ExtendedHeader{Header: *hdr}).Log(s.logger)
 	destConnID := s.connIDManager.Get()
 	if hdr.SrcConnectionID.Equal(destConnID) {
+		if s.qlogger != nil {
+			s.qlogger.DroppedPacket(qlog.PacketTypeRetry, protocol.ByteCount(len(data)), qlog.PacketDropUnexpectedPacket)
+		}
 		s.logger.Debugf("Ignoring Retry, since the server didn't change the Source Connection ID.")
-		return false
-	}
-	tag := handshake.GetRetryIntegrityTag(data[:len(data)-16], destConnID)
-	if !bytes.Equal(data[len(data)-16:], tag[:]) {
-		s.logger.Debugf("Ignoring spoofed Retry. Integrity Tag doesn't match.")
 		return false
 	}
 	// If a token is already set, this means that we already received a Retry from the server.
@@ -837,6 +844,16 @@ func (s *session) handleRetryPacket(hdr *wire.Header, data []byte) bool /* was t
 		s.logger.Debugf("Ignoring Retry, since a Retry was already received.")
 		return false
 	}
+
+	tag := handshake.GetRetryIntegrityTag(data[:len(data)-16], destConnID)
+	if !bytes.Equal(data[len(data)-16:], tag[:]) {
+		if s.qlogger != nil {
+			s.qlogger.DroppedPacket(qlog.PacketTypeRetry, protocol.ByteCount(len(data)), qlog.PacketDropPayloadDecryptError)
+		}
+		s.logger.Debugf("Ignoring spoofed Retry. Integrity Tag doesn't match.")
+		return false
+	}
+
 	s.logger.Debugf("<- Received Retry")
 	s.logger.Debugf("Switching destination connection ID to: %s", hdr.SrcConnectionID)
 	if s.qlogger != nil {
