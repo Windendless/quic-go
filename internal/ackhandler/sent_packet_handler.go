@@ -5,8 +5,8 @@ import (
 	"math"
 	"time"
 
+	"log"
 	"os"
-
 	"strings"
 
 	"github.com/lucas-clemente/quic-go/internal/congestion"
@@ -581,9 +581,6 @@ func (h *sentPacketHandler) detectAndRemoveLostPackets(now time.Time, encLevel p
 		}
 		h.logger.Debugf("\tlost packets (%d): %d", len(pns), pns)
 	}
-
-	// has impled CongestionEvent interface.
-	_, hasCongestionEvent := h.congestion.(congestion.CongestionEvent)
 
 	for _, p := range lostPackets {
 		h.queueFramesForRetransmission(p)
