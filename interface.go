@@ -6,10 +6,22 @@ import (
 	"net"
 	"time"
 
+	"github.com/lucas-clemente/quic-go/logging"
+
 	"github.com/lucas-clemente/quic-go/internal/handshake"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/quictrace"
 )
+
+// RetireBugBackwardsCompatibilityMode controls a backwards compatibility mode, necessary due to a bug in
+// quic-go v0.17.2 (and earlier), where under certain circumstances, an endpoint would retire the connection
+// ID it is currently using. See https://github.com/lucas-clemente/quic-go/issues/2658.
+// The bug has now been fixed, and new deployments have nothing to worry about.
+// Deployments that already have quic-go <= v0.17.2 deployed should active RetireBugBackwardsCompatibilityMode.
+// If activated, quic-go will take steps to avoid the bug from triggering when connected to endpoints that are still
+// running quic-go <= v0.17.2.
+// This flag will be removed in a future version of quic-go.
+var RetireBugBackwardsCompatibilityMode bool
 
 // The StreamID is the ID of a QUIC stream.
 type StreamID = protocol.StreamID
@@ -230,13 +242,15 @@ type Config struct {
 	// If this value is zero, it will default to 1.5 MB for the server and 15 MB for the client.
 	MaxReceiveConnectionFlowControlWindow uint64
 	// MaxIncomingStreams is the maximum number of concurrent bidirectional streams that a peer is allowed to open.
+	// Values above 2^60 are invalid.
 	// If not set, it will default to 100.
 	// If set to a negative value, it doesn't allow any bidirectional streams.
-	MaxIncomingStreams int
+	MaxIncomingStreams int64
 	// MaxIncomingUniStreams is the maximum number of concurrent unidirectional streams that a peer is allowed to open.
+	// Values above 2^60 are invalid.
 	// If not set, it will default to 100.
 	// If set to a negative value, it doesn't allow any unidirectional streams.
-	MaxIncomingUniStreams int
+	MaxIncomingUniStreams int64
 	// The StatelessResetKey is used to generate stateless reset tokens.
 	// If no key is configured, sending of stateless resets is disabled.
 	StatelessResetKey []byte
@@ -245,11 +259,7 @@ type Config struct {
 	// QUIC Event Tracer.
 	// Warning: Experimental. This API should not be considered stable and will change soon.
 	QuicTracer quictrace.Tracer
-	// GetLogWriter is used to pass in a writer for the qlog.
-	// If it is nil, no qlog will be collected and exported.
-	// If it returns nil, no qlog will be collected and exported for the respective connection.
-	// It is recommended to use a buffered writer here.
-	GetLogWriter func(connectionID []byte) io.WriteCloser
+	Tracer     logging.Tracer
 }
 
 // A Listener for incoming QUIC connections

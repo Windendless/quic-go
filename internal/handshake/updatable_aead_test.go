@@ -2,14 +2,14 @@ package handshake
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"os"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/congestion"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
+	"github.com/lucas-clemente/quic-go/internal/qtls"
 	"github.com/lucas-clemente/quic-go/internal/utils"
-	"github.com/marten-seemann/qtls"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -18,9 +18,9 @@ import (
 var _ = Describe("Updatable AEAD", func() {
 	It("ChaCha test vector from the draft", func() {
 		secret := splitHexString("9ac312a7f877468ebe69422748ad00a1 5443f18203a07d6060f688f30f21632b")
-		aead := newUpdatableAEAD(&congestion.RTTStats{}, nil, nil)
+		aead := newUpdatableAEAD(&utils.RTTStats{}, nil, nil)
 		chacha := cipherSuites[2]
-		Expect(chacha.ID).To(Equal(qtls.TLS_CHACHA20_POLY1305_SHA256))
+		Expect(chacha.ID).To(Equal(tls.TLS_CHACHA20_POLY1305_SHA256))
 		aead.SetWriteKey(chacha, secret)
 		header := splitHexString("4200bff4")
 		const pnOffset = 1
@@ -37,7 +37,7 @@ var _ = Describe("Updatable AEAD", func() {
 		cs := cipherSuites[i]
 
 		Context(fmt.Sprintf("using %s", qtls.CipherSuiteName(cs.ID)), func() {
-			getPeers := func(rttStats *congestion.RTTStats) (client, server *updatableAEAD) {
+			getPeers := func(rttStats *utils.RTTStats) (client, server *updatableAEAD) {
 				trafficSecret1 := make([]byte, 16)
 				trafficSecret2 := make([]byte, 16)
 				rand.Read(trafficSecret1)
@@ -54,7 +54,7 @@ var _ = Describe("Updatable AEAD", func() {
 
 			Context("header protection", func() {
 				It("encrypts and decrypts the header", func() {
-					server, client := getPeers(&congestion.RTTStats{})
+					server, client := getPeers(&utils.RTTStats{})
 					var lastFiveBitsDifferent int
 					for i := 0; i < 100; i++ {
 						sample := make([]byte, 16)
@@ -77,10 +77,10 @@ var _ = Describe("Updatable AEAD", func() {
 			Context("message encryption", func() {
 				var msg, ad []byte
 				var server, client *updatableAEAD
-				var rttStats *congestion.RTTStats
+				var rttStats *utils.RTTStats
 
 				BeforeEach(func() {
-					rttStats = &congestion.RTTStats{}
+					rttStats = &utils.RTTStats{}
 					server, client = getPeers(rttStats)
 					msg = []byte("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.")
 					ad = []byte("Donec in velit neque.")

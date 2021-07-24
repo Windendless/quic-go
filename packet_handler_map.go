@@ -13,16 +13,15 @@ import (
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/lucas-clemente/quic-go/internal/wire"
+	"github.com/lucas-clemente/quic-go/logging"
 )
 
 type statelessResetErr struct {
-	token *[16]byte
+	token protocol.StatelessResetToken
 }
 
-func (e statelessResetErr) StatelessResetToken() *[16]byte { return e.token }
-
 func (e statelessResetErr) Error() string {
-	return fmt.Sprintf("received a stateless reset with token %x", *e.token)
+	return fmt.Sprintf("received a stateless reset with token %x", e.token)
 }
 
 // The packetHandlerMap stores packetHandlers, identified by connection ID.
@@ -36,7 +35,7 @@ type packetHandlerMap struct {
 	connIDLen int
 
 	handlers    map[string] /* string(ConnectionID)*/ packetHandler
-	resetTokens map[[16]byte] /* stateless reset token */ packetHandler
+	resetTokens map[protocol.StatelessResetToken] /* stateless reset token */ packetHandler
 	server      unknownPacketHandler
 
 	listening chan struct{} // is closed when listen returns
@@ -48,6 +47,7 @@ type packetHandlerMap struct {
 	statelessResetMutex   sync.Mutex
 	statelessResetHasher  hash.Hash
 
+	tracer logging.Tracer
 	logger utils.Logger
 }
 
@@ -57,6 +57,7 @@ func newPacketHandlerMap(
 	conn net.PacketConn,
 	connIDLen int,
 	statelessResetKey []byte,
+	tracer logging.Tracer,
 	logger utils.Logger,
 ) packetHandlerManager {
 	m := &packetHandlerMap{
@@ -64,10 +65,11 @@ func newPacketHandlerMap(
 		connIDLen:                  connIDLen,
 		listening:                  make(chan struct{}),
 		handlers:                   make(map[string]packetHandler),
-		resetTokens:                make(map[[16]byte]packetHandler),
+		resetTokens:                make(map[protocol.StatelessResetToken]packetHandler),
 		deleteRetiredSessionsAfter: protocol.RetiredConnectionIDDeleteTimeout,
 		statelessResetEnabled:      len(statelessResetKey) > 0,
 		statelessResetHasher:       hmac.New(sha256.New, statelessResetKey),
+		tracer:                     tracer,
 		logger:                     logger,
 	}
 	go m.listen()
@@ -169,19 +171,19 @@ func (h *packetHandlerMap) ReplaceWithClosed(id protocol.ConnectionID, handler p
 	})
 }
 
-func (h *packetHandlerMap) AddResetToken(token [16]byte, handler packetHandler) {
+func (h *packetHandlerMap) AddResetToken(token protocol.StatelessResetToken, handler packetHandler) {
 	h.mutex.Lock()
 	h.resetTokens[token] = handler
 	h.mutex.Unlock()
 }
 
-func (h *packetHandlerMap) RemoveResetToken(token [16]byte) {
+func (h *packetHandlerMap) RemoveResetToken(token protocol.StatelessResetToken) {
 	h.mutex.Lock()
 	delete(h.resetTokens, token)
 	h.mutex.Unlock()
 }
 
-func (h *packetHandlerMap) RetireResetToken(token [16]byte) {
+func (h *packetHandlerMap) RetireResetToken(token protocol.StatelessResetToken) {
 	time.AfterFunc(h.deleteRetiredSessionsAfter, func() {
 		h.mutex.Lock()
 		delete(h.resetTokens, token)
@@ -271,7 +273,11 @@ func (h *packetHandlerMap) handlePacket(
 ) {
 	connID, err := wire.ParseConnectionID(data, h.connIDLen)
 	if err != nil {
+		buffer.MaybeRelease()
 		h.logger.Debugf("error parsing connection ID on packet from %s: %s", addr, err)
+		if h.tracer != nil {
+			h.tracer.DroppedPacket(addr, logging.PacketTypeNotDetermined, protocol.ByteCount(len(data)), logging.PacketDropHeaderParseError)
+		}
 		return
 	}
 	rcvTime := time.Now()
@@ -315,18 +321,18 @@ func (h *packetHandlerMap) maybeHandleStatelessReset(data []byte) bool {
 		return false
 	}
 
-	var token [16]byte
+	var token protocol.StatelessResetToken
 	copy(token[:], data[len(data)-16:])
 	if sess, ok := h.resetTokens[token]; ok {
 		h.logger.Debugf("Received a stateless reset with token %#x. Closing session.", token)
-		go sess.destroy(&statelessResetErr{token: &token})
+		go sess.destroy(statelessResetErr{token: token})
 		return true
 	}
 	return false
 }
 
-func (h *packetHandlerMap) GetStatelessResetToken(connID protocol.ConnectionID) [16]byte {
-	var token [16]byte
+func (h *packetHandlerMap) GetStatelessResetToken(connID protocol.ConnectionID) protocol.StatelessResetToken {
+	var token protocol.StatelessResetToken
 	if !h.statelessResetEnabled {
 		// Return a random stateless reset token.
 		// This token will be sent in the server's transport parameters.

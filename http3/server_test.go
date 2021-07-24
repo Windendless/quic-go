@@ -200,7 +200,7 @@ var _ = Describe("Server", func() {
 				str.EXPECT().Write(gomock.Any()).DoAndReturn(func(p []byte) (int, error) {
 					return responseBuf.Write(p)
 				}).AnyTimes()
-				str.EXPECT().CancelRead(quic.ErrorCode(errorEarlyResponse))
+				str.EXPECT().CancelRead(quic.ErrorCode(errorNoError))
 				str.EXPECT().Close().Do(func() { close(done) })
 
 				s.handleConn(sess)
@@ -210,7 +210,7 @@ var _ = Describe("Server", func() {
 			})
 
 			It("errors when the client sends a too large header frame", func() {
-				s.Server.MaxHeaderBytes = 42
+				s.Server.MaxHeaderBytes = 20
 				s.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					Fail("Handler should not be called.")
 				})
@@ -274,7 +274,9 @@ var _ = Describe("Server", func() {
 					close(handlerCalled)
 				})
 
-				url := bytes.Repeat([]byte{'a'}, http.DefaultMaxHeaderBytes+1)
+				// use 2*DefaultMaxHeaderBytes here. qpack will compress the requiest,
+				// but the request will still end up larger than DefaultMaxHeaderBytes.
+				url := bytes.Repeat([]byte{'a'}, http.DefaultMaxHeaderBytes*2)
 				req, err := http.NewRequest(http.MethodGet, "https://"+string(url), nil)
 				Expect(err).ToNot(HaveOccurred())
 				setRequest(encodeRequest(req))
@@ -305,7 +307,7 @@ var _ = Describe("Server", func() {
 			str.EXPECT().Write(gomock.Any()).DoAndReturn(func(p []byte) (int, error) {
 				return len(p), nil
 			}).AnyTimes()
-			str.EXPECT().CancelRead(quic.ErrorCode(errorEarlyResponse))
+			str.EXPECT().CancelRead(quic.ErrorCode(errorNoError))
 
 			serr := s.handleRequest(sess, str, qpackDecoder, nil)
 			Expect(serr.err).ToNot(HaveOccurred())
@@ -328,7 +330,7 @@ var _ = Describe("Server", func() {
 			str.EXPECT().Write(gomock.Any()).DoAndReturn(func(p []byte) (int, error) {
 				return len(p), nil
 			}).AnyTimes()
-			str.EXPECT().CancelRead(quic.ErrorCode(errorEarlyResponse))
+			str.EXPECT().CancelRead(quic.ErrorCode(errorNoError))
 
 			serr := s.handleRequest(sess, str, qpackDecoder, nil)
 			Expect(serr.err).ToNot(HaveOccurred())
