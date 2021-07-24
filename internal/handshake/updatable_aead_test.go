@@ -9,6 +9,7 @@ import (
 	"github.com/lucas-clemente/quic-go/internal/congestion"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -18,15 +19,14 @@ var _ = Describe("Updatable AEAD", func() {
 		cs := cipherSuites[i]
 
 		Context(fmt.Sprintf("using %s", cipherSuiteName(cs.ID)), func() {
-
 			getPeers := func(rttStats *congestion.RTTStats) (client, server *updatableAEAD) {
 				trafficSecret1 := make([]byte, 16)
 				trafficSecret2 := make([]byte, 16)
 				rand.Read(trafficSecret1)
 				rand.Read(trafficSecret2)
 
-				client = newUpdatableAEAD(rttStats, utils.DefaultLogger)
-				server = newUpdatableAEAD(rttStats, utils.DefaultLogger)
+				client = newUpdatableAEAD(rttStats, nil, utils.DefaultLogger)
+				server = newUpdatableAEAD(rttStats, nil, utils.DefaultLogger)
 				client.SetReadKey(cs, trafficSecret2)
 				client.SetWriteKey(cs, trafficSecret1)
 				server.SetReadKey(cs, trafficSecret1)
