@@ -1,4 +1,4 @@
-module github.com/lucas-clemente/quic-go
+module github.com/Windendless/quic-go
 
 go 1.13
 
@@ -16,3 +16,5 @@ require (
 	golang.org/x/net v0.0.0-20190404232315-eb5bcb51f2a3
 	golang.org/x/sync v0.0.0-20190423024810-112230192c58
 )
+
+replace github.com/lucas-clemente/quic-go v0.15.3 => github.com/Windendless/quic-go v0.15.3
