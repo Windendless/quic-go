@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"os"
-
 	"strings"
 
 	"github.com/lucas-clemente/quic-go/internal/congestion"
@@ -112,7 +111,7 @@ func newSentPacketHandler(
 	pers protocol.Perspective,
 	tracer logging.ConnectionTracer,
 	logger utils.Logger,
-) SentPacketHandler {
+) *sentPacketHandler {
 	handler := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
 		peerAddressValidated:           pers == protocol.PerspectiveClient,
@@ -606,6 +605,7 @@ func (h *sentPacketHandler) detectLostPackets(now time.Time, encLevel protocol.E
 	_, hasCongestionEvent := h.congestion.(congestion.CongestionEvent)
 
 	priorInFlight := h.bytesInFlight
+	var lostPackets []*Packet
 	err := pnSpace.history.Iterate(func(p *Packet) (bool, error) {
 		if p.PacketNumber > pnSpace.largestAcked {
 			return false, nil
@@ -640,6 +640,8 @@ func (h *sentPacketHandler) detectLostPackets(now time.Time, encLevel protocol.E
 			pnSpace.lossTime = lossTime
 		}
 		if packetLost {
+			lostPackets = append(lostPackets, p)
+
 			p.declaredLost = true
 			// the bytes in flight need to be reduced no matter if the frames in this packet will be retransmitted
 			h.removeFromBytesInFlight(p)

@@ -3,6 +3,7 @@ package congestion
 // src from https://quiche.googlesource.com/quiche.git/+/66dea072431f94095dfc3dd2743cb94ef365f7ef/quic/core/congestion_control/bbr_sender.cc
 
 import (
+	"github.com/lucas-clemente/quic-go/internal/utils"
 	"time"
 
 	"math"
@@ -104,7 +105,7 @@ const (
 type bbrSender struct {
 	mode     bbrMode
 	clock    Clock
-	rttStats *RTTStats
+	rttStats *utils.RTTStats
 	// return total bytes of unacked packets.
 	GetBytesInFlight func() protocol.ByteCount
 	// Bandwidth sampler provides BBR with the bandwidth measurements at
@@ -229,11 +230,14 @@ type bbrSender struct {
 }
 
 // NewBBRSender makes a new bbr sender
-func NewBBRSender(clock Clock, rttStats *RTTStats, getBytesInFlight func() protocol.ByteCount) *bbrSender {
-	return newBBRSender(clock, rttStats, initialCongestionWindow, maxCongestionWindow, getBytesInFlight)
+func NewBBRSender(
+	clock Clock,
+	rttStats *utils.RTTStats,
+	getBytesInFlight func() protocol.ByteCount) *bbrSender {
+	return newBBRSender(clock, rttStats, initialCongestionWindow, protocol.MaxCongestionWindowPackets*initialMaxDatagramSize, getBytesInFlight)
 }
 
-func newBBRSender(clock Clock, rttStats *RTTStats, initialCongestionWindow, maxCongestionWindow protocol.ByteCount, getBytesInFlight func() protocol.ByteCount) *bbrSender {
+func newBBRSender(clock Clock, rttStats *utils.RTTStats, initialCongestionWindow, maxCongestionWindow protocol.ByteCount, getBytesInFlight func() protocol.ByteCount) *bbrSender {
 	return &bbrSender{
 		rttStats:                  rttStats,
 		GetBytesInFlight:          getBytesInFlight,
@@ -259,8 +263,16 @@ func newBBRSender(clock Clock, rttStats *RTTStats, initialCongestionWindow, maxC
 	}
 }
 
-func (b *bbrSender) TimeUntilSend(bytesInFlight protocol.ByteCount) time.Duration {
-	return time.Microsecond
+func (b *bbrSender) TimeUntilSend(bytesInFlight protocol.ByteCount) time.Time {
+	return time.Time{}.Add(time.Millisecond)
+}
+
+func (b *bbrSender) HasPacingBudget() bool {
+	return true
+}
+
+func (b *bbrSender) SetMaxDatagramSize(s protocol.ByteCount) {
+
 }
 
 func (b *bbrSender) OnPacketSent(sentTime time.Time, bytesInFlight protocol.ByteCount, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool) {
