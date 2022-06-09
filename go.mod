@@ -6,6 +6,8 @@ require (
 	github.com/cheekybits/genny v1.0.0
 	github.com/francoispqt/gojay v1.2.13
 	github.com/golang/mock v1.6.0
+	github.com/golang/protobuf v1.5.2
+	github.com/lucas-clemente/quic-go v0.21.2
 	github.com/marten-seemann/qpack v0.2.1
 	github.com/marten-seemann/qtls-go1-15 v0.1.5
 	github.com/marten-seemann/qtls-go1-16 v0.1.4
@@ -16,6 +18,7 @@ require (
 	golang.org/x/net v0.0.0-20210428140749-89ef3d95e781
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	golang.org/x/sys v0.0.0-20210510120138-977fb7262007
+	google.golang.org/protobuf v1.26.0
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 )
 
