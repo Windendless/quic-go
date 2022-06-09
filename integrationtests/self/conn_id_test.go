@@ -3,11 +3,11 @@ package self_test
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"net"
 
-	quic "github.com/lucas-clemente/quic-go"
+	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 
 	. "github.com/onsi/ginkgo"
@@ -26,13 +26,13 @@ var _ = Describe("Connection ID lengths tests", func() {
 		go func() {
 			defer GinkgoRecover()
 			for {
-				sess, err := ln.Accept(context.Background())
+				conn, err := ln.Accept(context.Background())
 				if err != nil {
 					return
 				}
 				go func() {
 					defer GinkgoRecover()
-					str, err := sess.OpenStream()
+					str, err := conn.OpenStream()
 					Expect(err).ToNot(HaveOccurred())
 					defer str.Close()
 					_, err = str.Write(PRData)
@@ -54,7 +54,7 @@ var _ = Describe("Connection ID lengths tests", func() {
 		defer cl.CloseWithError(0, "")
 		str, err := cl.AcceptStream(context.Background())
 		Expect(err).ToNot(HaveOccurred())
-		data, err := ioutil.ReadAll(str)
+		data, err := io.ReadAll(str)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(data).To(Equal(PRData))
 	}

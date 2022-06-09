@@ -38,7 +38,7 @@ func newRequestWriter(logger utils.Logger) *requestWriter {
 	}
 }
 
-func (w *requestWriter) WriteRequest(str quic.Stream, req *http.Request, gzip bool) error {
+func (w *requestWriter) WriteRequest(str quic.Stream, req *http.Request, dontCloseStr, gzip bool) error {
 	buf := &bytes.Buffer{}
 	if err := w.writeHeaders(buf, req, gzip); err != nil {
 		return err
@@ -48,7 +48,9 @@ func (w *requestWriter) WriteRequest(str quic.Stream, req *http.Request, gzip bo
 	}
 	// TODO: add support for trailers
 	if req.Body == nil {
-		str.Close()
+		if !dontCloseStr {
+			str.Close()
+		}
 		return nil
 	}
 
@@ -84,7 +86,9 @@ func (w *requestWriter) WriteRequest(str quic.Stream, req *http.Request, gzip bo
 				return
 			}
 		}
-		str.Close()
+		if !dontCloseStr {
+			str.Close()
+		}
 	}()
 
 	return nil
@@ -113,7 +117,9 @@ func (w *requestWriter) writeHeaders(wr io.Writer, req *http.Request, gzip bool)
 }
 
 // copied from net/transport.go
-
+// Modified to support Extended CONNECT:
+// Contrary to what the godoc for the http.Request says,
+// we do respect the Proto field if the method is CONNECT.
 func (w *requestWriter) encodeHeaders(req *http.Request, addGzipHeader bool, trailers string, contentLength int64) error {
 	host := req.Host
 	if host == "" {
@@ -124,8 +130,11 @@ func (w *requestWriter) encodeHeaders(req *http.Request, addGzipHeader bool, tra
 		return err
 	}
 
+	// http.NewRequest sets this field to HTTP/1.1
+	isExtendedConnect := req.Method == http.MethodConnect && req.Proto != "" && req.Proto != "HTTP/1.1"
+
 	var path string
-	if req.Method != "CONNECT" {
+	if req.Method != http.MethodConnect || isExtendedConnect {
 		path = req.URL.RequestURI()
 		if !validPseudoPath(path) {
 			orig := path
@@ -162,9 +171,12 @@ func (w *requestWriter) encodeHeaders(req *http.Request, addGzipHeader bool, tra
 		// [RFC3986]).
 		f(":authority", host)
 		f(":method", req.Method)
-		if req.Method != "CONNECT" {
+		if req.Method != http.MethodConnect || isExtendedConnect {
 			f(":path", path)
 			f(":scheme", req.URL.Scheme)
+		}
+		if isExtendedConnect {
+			f(":protocol", req.Proto)
 		}
 		if trailers != "" {
 			f("trailer", trailers)
