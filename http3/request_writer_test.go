@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/marten-seemann/qpack"
-
-	"github.com/golang/mock/gomock"
 	mockquic "github.com/lucas-clemente/quic-go/internal/mocks/quic"
 	"github.com/lucas-clemente/quic-go/internal/utils"
+
+	"github.com/golang/mock/gomock"
+	"github.com/marten-seemann/qpack"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -30,7 +30,7 @@ var _ = Describe("Request Writer", func() {
 	)
 
 	decode := func(str io.Reader) map[string]string {
-		frame, err := parseNextFrame(str)
+		frame, err := parseNextFrame(str, nil)
 		ExpectWithOffset(1, err).ToNot(HaveOccurred())
 		ExpectWithOffset(1, frame).To(BeAssignableToTypeOf(&headersFrame{}))
 		headersFrame := frame.(*headersFrame)
@@ -58,9 +58,9 @@ var _ = Describe("Request Writer", func() {
 
 	It("writes a GET request", func() {
 		str.EXPECT().Close()
-		req, err := http.NewRequest("GET", "https://quic.clemente.io/index.html?foo=bar", nil)
+		req, err := http.NewRequest(http.MethodGet, "https://quic.clemente.io/index.html?foo=bar", nil)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(rw.WriteRequest(str, req, false)).To(Succeed())
+		Expect(rw.WriteRequest(str, req, false, false)).To(Succeed())
 		headerFields := decode(strBuf)
 		Expect(headerFields).To(HaveKeyWithValue(":authority", "quic.clemente.io"))
 		Expect(headerFields).To(HaveKeyWithValue(":method", "GET"))
@@ -69,13 +69,21 @@ var _ = Describe("Request Writer", func() {
 		Expect(headerFields).ToNot(HaveKey("accept-encoding"))
 	})
 
+	It("writes a GET request without closing the stream", func() {
+		req, err := http.NewRequest(http.MethodGet, "https://quic.clemente.io", nil)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rw.WriteRequest(str, req, true, false)).To(Succeed())
+		headerFields := decode(strBuf)
+		Expect(headerFields).To(HaveKeyWithValue(":authority", "quic.clemente.io"))
+	})
+
 	It("writes a POST request", func() {
 		closed := make(chan struct{})
 		str.EXPECT().Close().Do(func() { close(closed) })
 		postData := bytes.NewReader([]byte("foobar"))
-		req, err := http.NewRequest("POST", "https://quic.clemente.io/upload.html", postData)
+		req, err := http.NewRequest(http.MethodPost, "https://quic.clemente.io/upload.html", postData)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(rw.WriteRequest(str, req, false)).To(Succeed())
+		Expect(rw.WriteRequest(str, req, false, false)).To(Succeed())
 
 		Eventually(closed).Should(BeClosed())
 		headerFields := decode(strBuf)
@@ -85,7 +93,7 @@ var _ = Describe("Request Writer", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(contentLength).To(BeNumerically(">", 0))
 
-		frame, err := parseNextFrame(strBuf)
+		frame, err := parseNextFrame(strBuf, nil)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(frame).To(BeAssignableToTypeOf(&dataFrame{}))
 		Expect(frame.(*dataFrame).Length).To(BeEquivalentTo(6))
@@ -94,15 +102,15 @@ var _ = Describe("Request Writer", func() {
 	It("writes a POST request, if the Body returns an EOF immediately", func() {
 		closed := make(chan struct{})
 		str.EXPECT().Close().Do(func() { close(closed) })
-		req, err := http.NewRequest("POST", "https://quic.clemente.io/upload.html", &foobarReader{})
+		req, err := http.NewRequest(http.MethodPost, "https://quic.clemente.io/upload.html", &foobarReader{})
 		Expect(err).ToNot(HaveOccurred())
-		Expect(rw.WriteRequest(str, req, false)).To(Succeed())
+		Expect(rw.WriteRequest(str, req, false, false)).To(Succeed())
 
 		Eventually(closed).Should(BeClosed())
 		headerFields := decode(strBuf)
 		Expect(headerFields).To(HaveKeyWithValue(":method", "POST"))
 
-		frame, err := parseNextFrame(strBuf)
+		frame, err := parseNextFrame(strBuf, nil)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(frame).To(BeAssignableToTypeOf(&dataFrame{}))
 		Expect(frame.(*dataFrame).Length).To(BeEquivalentTo(6))
@@ -110,7 +118,7 @@ var _ = Describe("Request Writer", func() {
 
 	It("sends cookies", func() {
 		str.EXPECT().Close()
-		req, err := http.NewRequest("GET", "https://quic.clemente.io/", nil)
+		req, err := http.NewRequest(http.MethodGet, "https://quic.clemente.io/", nil)
 		Expect(err).ToNot(HaveOccurred())
 		cookie1 := &http.Cookie{
 			Name:  "Cookie #1",
@@ -122,17 +130,44 @@ var _ = Describe("Request Writer", func() {
 		}
 		req.AddCookie(cookie1)
 		req.AddCookie(cookie2)
-		Expect(rw.WriteRequest(str, req, false)).To(Succeed())
+		Expect(rw.WriteRequest(str, req, false, false)).To(Succeed())
 		headerFields := decode(strBuf)
 		Expect(headerFields).To(HaveKeyWithValue("cookie", `Cookie #1="Value #1"; Cookie #2="Value #2"`))
 	})
 
 	It("adds the header for gzip support", func() {
 		str.EXPECT().Close()
-		req, err := http.NewRequest("GET", "https://quic.clemente.io/", nil)
+		req, err := http.NewRequest(http.MethodGet, "https://quic.clemente.io/", nil)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(rw.WriteRequest(str, req, true)).To(Succeed())
+		Expect(rw.WriteRequest(str, req, false, true)).To(Succeed())
 		headerFields := decode(strBuf)
 		Expect(headerFields).To(HaveKeyWithValue("accept-encoding", "gzip"))
+	})
+
+	It("writes a CONNECT request", func() {
+		str.EXPECT().Close()
+		req, err := http.NewRequest(http.MethodConnect, "https://quic.clemente.io/", nil)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rw.WriteRequest(str, req, false, false)).To(Succeed())
+		headerFields := decode(strBuf)
+		Expect(headerFields).To(HaveKeyWithValue(":method", "CONNECT"))
+		Expect(headerFields).To(HaveKeyWithValue(":authority", "quic.clemente.io"))
+		Expect(headerFields).ToNot(HaveKey(":path"))
+		Expect(headerFields).ToNot(HaveKey(":scheme"))
+		Expect(headerFields).ToNot(HaveKey(":protocol"))
+	})
+
+	It("writes an Extended CONNECT request", func() {
+		str.EXPECT().Close()
+		req, err := http.NewRequest(http.MethodConnect, "https://quic.clemente.io/foobar", nil)
+		Expect(err).ToNot(HaveOccurred())
+		req.Proto = "webtransport"
+		Expect(rw.WriteRequest(str, req, false, false)).To(Succeed())
+		headerFields := decode(strBuf)
+		Expect(headerFields).To(HaveKeyWithValue(":authority", "quic.clemente.io"))
+		Expect(headerFields).To(HaveKeyWithValue(":method", "CONNECT"))
+		Expect(headerFields).To(HaveKeyWithValue(":path", "/foobar"))
+		Expect(headerFields).To(HaveKeyWithValue(":scheme", "https"))
+		Expect(headerFields).To(HaveKeyWithValue(":protocol", "webtransport"))
 	})
 })

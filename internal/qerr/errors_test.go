@@ -1,6 +1,7 @@
 package qerr
 
 import (
+	"errors"
 	"net"
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
@@ -72,7 +73,6 @@ var _ = Describe("QUIC Errors", func() {
 			nerr, ok := err.(net.Error)
 			Expect(ok).To(BeTrue())
 			Expect(nerr.Timeout()).To(BeTrue())
-			Expect(nerr.Temporary()).To(BeFalse())
 			Expect(err.Error()).To(Equal("timeout: handshake did not complete in time"))
 		})
 
@@ -83,7 +83,6 @@ var _ = Describe("QUIC Errors", func() {
 			nerr, ok := err.(net.Error)
 			Expect(ok).To(BeTrue())
 			Expect(nerr.Timeout()).To(BeTrue())
-			Expect(nerr.Temporary()).To(BeFalse())
 			Expect(err.Error()).To(Equal("timeout: no recent network activity"))
 		})
 	})
@@ -111,7 +110,15 @@ var _ = Describe("QUIC Errors", func() {
 			nerr, ok := err.(net.Error)
 			Expect(ok).To(BeTrue())
 			Expect(nerr.Timeout()).To(BeFalse())
-			Expect(nerr.Temporary()).To(BeTrue())
 		})
+	})
+
+	It("says that errors are net.ErrClosed errors", func() {
+		Expect(errors.Is(&TransportError{}, net.ErrClosed)).To(BeTrue())
+		Expect(errors.Is(&ApplicationError{}, net.ErrClosed)).To(BeTrue())
+		Expect(errors.Is(&IdleTimeoutError{}, net.ErrClosed)).To(BeTrue())
+		Expect(errors.Is(&HandshakeTimeoutError{}, net.ErrClosed)).To(BeTrue())
+		Expect(errors.Is(&StatelessResetError{}, net.ErrClosed)).To(BeTrue())
+		Expect(errors.Is(&VersionNegotiationError{}, net.ErrClosed)).To(BeTrue())
 	})
 })

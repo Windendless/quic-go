@@ -7,7 +7,7 @@ jobs:
       - uses: actions/checkout@v2
       - uses: actions/setup-go@v2
         with:
-          go-version: "1.16.x"
+          go-version: "1.18.x"
       - name: Check that no non-test files import Ginkgo or Gomega
         run: .github/workflows/no_ginkgo.sh
       - name: Check that go.mod is tidied
@@ -28,4 +28,4 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v2
         with:
-          version: v1.41.1
+          version: v1.45.2

@@ -1,10 +1,11 @@
+//go:build !darwin && !linux && !freebsd && !windows
 // +build !darwin,!linux,!freebsd,!windows
 
 package quic
 
 import "net"
 
-func newConn(c net.PacketConn) (connection, error) {
+func newConn(c net.PacketConn) (rawConn, error) {
 	return &basicConn{PacketConn: c}, nil
 }
 
